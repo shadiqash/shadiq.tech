@@ -43,23 +43,89 @@ function useGoogleFonts() {
   }, []);
 }
 
-/* ---------- Cursor Glow (HTML layer) ---------- */
-function CursorGlow() {
-  const dotRef = useRef(null);
+/* ---------- Ink Cursor (verlet-trailed blob, canvas layer) ---------- */
+function InkCursor() {
+  const canvasRef = useRef(null);
   useEffect(() => {
-    const dot = dotRef.current;
-    if (!dot) return;
-    let mx = -100, my = -100;
-    function onMove(e) { mx = e.clientX; my = e.clientY; }
-    function tick() {
-      dot.style.transform = `translate(${mx - 10}px, ${my - 10}px)`;
-      requestAnimationFrame(tick);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    function resize() {
+      canvas.width = window.innerWidth * dpr;
+      canvas.height = window.innerHeight * dpr;
+      canvas.style.width = window.innerWidth + "px";
+      canvas.style.height = window.innerHeight + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    resize();
+    window.addEventListener("resize", resize);
+
+    const POINTS = 7;
+    const chain = Array.from({ length: POINTS }, () => ({ x: -100, y: -100 }));
+    const target = { x: -100, y: -100 };
+    let seeded = false;
+    function onMove(e) {
+      target.x = e.clientX;
+      target.y = e.clientY;
+      if (!seeded) {
+        chain.forEach((p) => { p.x = target.x; p.y = target.y; });
+        seeded = true;
+      }
     }
     window.addEventListener("pointermove", onMove);
+
+    let raf;
+    function tick() {
+      raf = requestAnimationFrame(tick);
+      const lead = reduced ? 1 : 0.5;
+      const follow = reduced ? 1 : 0.42;
+      chain[0].x += (target.x - chain[0].x) * lead;
+      chain[0].y += (target.y - chain[0].y) * lead;
+      for (let i = 1; i < POINTS; i++) {
+        chain[i].x += (chain[i - 1].x - chain[i].x) * follow;
+        chain[i].y += (chain[i - 1].y - chain[i].y) * follow;
+      }
+
+      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+
+      if (!reduced) {
+        ctx.beginPath();
+        ctx.moveTo(chain[0].x, chain[0].y);
+        for (let i = 1; i < POINTS - 1; i++) {
+          const mx = (chain[i].x + chain[i + 1].x) / 2;
+          const my = (chain[i].y + chain[i + 1].y) / 2;
+          ctx.quadraticCurveTo(chain[i].x, chain[i].y, mx, my);
+        }
+        const tail = chain[POINTS - 1];
+        ctx.lineTo(tail.x, tail.y);
+        ctx.strokeStyle = "rgba(122,43,34,0.35)";
+        ctx.lineWidth = 7;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.stroke();
+      }
+
+      const grad = ctx.createRadialGradient(chain[0].x, chain[0].y, 0, chain[0].x, chain[0].y, 11);
+      grad.addColorStop(0, "rgba(122,43,34,0.95)");
+      grad.addColorStop(0.5, "rgba(122,43,34,0.4)");
+      grad.addColorStop(1, "rgba(122,43,34,0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(chain[0].x, chain[0].y, 11, 0, Math.PI * 2);
+      ctx.fill();
+    }
     tick();
-    return () => window.removeEventListener("pointermove", onMove);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("resize", resize);
+    };
   }, []);
-  return <div ref={dotRef} className="cursor-glow" aria-hidden="true" />;
+  return <canvas ref={canvasRef} className="ink-cursor" aria-hidden="true" />;
 }
 
 /* ---------- Hero Title (staggered letters) ---------- */
@@ -78,6 +144,45 @@ function HeroTitle({ text }) {
         </span>
       ))}
     </h1>
+  );
+}
+
+/* ---------- Live GitHub activity ---------- */
+function useGithubActivity() {
+  const [count, setCount] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("https://api.github.com/users/shadiqash/events/public")
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((events) => {
+        if (cancelled || !Array.isArray(events)) return;
+        const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+        const recent = events.filter(
+          (e) =>
+            (e.type === "PushEvent" || e.type === "PullRequestEvent") &&
+            new Date(e.created_at).getTime() > cutoff
+        );
+        setCount(recent.length);
+      })
+      .catch(() => {
+        if (!cancelled) setCount(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return count;
+}
+
+function GithubPulse({ count }) {
+  if (count === null) return null;
+  return (
+    <div className="github-pulse">
+      <span className="pulse-dot" aria-hidden="true" />
+      {count > 0
+        ? `${count} commit${count === 1 ? "" : "s"} on GitHub, past 14 days`
+        : "quiet on GitHub the past 14 days"}
+    </div>
   );
 }
 
@@ -164,6 +269,72 @@ function playThock() {
   osc.stop(audioCtx.currentTime + 0.1);
 }
 
+/* ---------- Ambient drone (opt-in, gated by the sound toggle) ---------- */
+function useAmbientDrone(enabled, scrollRef) {
+  const nodesRef = useRef(null);
+  useEffect(() => {
+    if (!enabled) {
+      const active = nodesRef.current;
+      if (active) {
+        active.gain.gain.linearRampToValueAtTime(0, active.ctx.currentTime + 0.6);
+        setTimeout(() => {
+          active.osc1.stop();
+          active.osc2.stop();
+        }, 700);
+        nodesRef.current = null;
+      }
+      return;
+    }
+    if (!window.AudioContext && !window.webkitAudioContext) return;
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+
+    const osc1 = audioCtx.createOscillator();
+    const osc2 = audioCtx.createOscillator();
+    osc1.type = "sine";
+    osc1.frequency.value = 55;
+    osc2.type = "sine";
+    osc2.frequency.value = 55 * 1.5;
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 400;
+    const gain = audioCtx.createGain();
+    gain.gain.value = 0;
+    osc1.connect(filter);
+    osc2.connect(filter);
+    filter.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc1.start();
+    osc2.start();
+    gain.gain.linearRampToValueAtTime(0.05, audioCtx.currentTime + 1.2);
+    nodesRef.current = { osc1, osc2, gain, filter, ctx: audioCtx };
+
+    let raf;
+    function followScroll() {
+      raf = requestAnimationFrame(followScroll);
+      filter.frequency.value = 350 + (scrollRef.current || 0) * 900;
+    }
+    followScroll();
+
+    return () => cancelAnimationFrame(raf);
+  }, [enabled, scrollRef]);
+
+  useEffect(
+    () => () => {
+      const active = nodesRef.current;
+      if (active) {
+        try {
+          active.osc1.stop();
+          active.osc2.stop();
+        } catch {
+          /* already stopped */
+        }
+      }
+    },
+    []
+  );
+}
+
 /* ---------- Boot Sequence Loader ---------- */
 function BootLoader() {
   const [booting, setBooting] = useState(true);
@@ -223,7 +394,7 @@ function ScrambleText({ text, className = "" }) {
   return <h2 ref={ref} className={className}>{displayText}</h2>;
 }
 
-function Reveal({ as: Tag = "div", className = "", children, delay = 0, style = {} }) {
+function Reveal({ as: Tag = "div", className = "", children, delay = 0, style = {}, ...rest }) {
   const ref = useRef(null);
   const [inView, setInView] = useState(false);
   useEffect(() => {
@@ -248,6 +419,7 @@ function Reveal({ as: Tag = "div", className = "", children, delay = 0, style = 
       ref={ref}
       className={`reveal ${inView ? "in-view" : ""} ${className}`}
       style={{ ...style, transitionDelay: inView ? `${delay}ms` : "0ms" }}
+      {...rest}
     >
       {children}
     </Tag>
@@ -264,6 +436,127 @@ function BrushUnderline() {
         strokeLinecap="round"
       />
     </svg>
+  );
+}
+
+/* ---------- Command Palette (psql-styled ⌘K) ---------- */
+function CommandPalette({ open, onClose, onNavigate, soundOn, onToggleSound, onShockwave }) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState(0);
+  const inputRef = useRef(null);
+
+  const commands = [
+    { id: "work", label: "Go to Work", hint: "\\c work", action: () => onNavigate("work") },
+    { id: "about", label: "Go to About", hint: "\\c about", action: () => onNavigate("about") },
+    { id: "now", label: "Go to Off the Clock", hint: "\\c now", action: () => onNavigate("now") },
+    { id: "contact", label: "Go to Contact", hint: "\\c contact", action: () => onNavigate("contact") },
+    {
+      id: "email",
+      label: "Copy email address",
+      hint: "shadiqpoke@gmail.com",
+      action: () => navigator.clipboard?.writeText("shadiqpoke@gmail.com"),
+    },
+    {
+      id: "github",
+      label: "Open GitHub",
+      hint: "github.com/shadiqash",
+      action: () => window.open("https://github.com/shadiqash", "_blank", "noreferrer"),
+    },
+    {
+      id: "linkedin",
+      label: "Open LinkedIn",
+      hint: "linkedin.com/in/shadiq-shah",
+      action: () => window.open("https://www.linkedin.com/in/shadiq-shah-3944422b1/", "_blank", "noreferrer"),
+    },
+    {
+      id: "resume",
+      label: "Download résumé",
+      hint: "resume.pdf",
+      action: () => window.open("/resume.pdf", "_blank", "noreferrer"),
+    },
+    {
+      id: "sound",
+      label: soundOn ? "Turn ambient sound off" : "Turn ambient sound on",
+      hint: "toggle audio",
+      action: onToggleSound,
+    },
+    {
+      id: "diagnostic",
+      label: "Run diagnostic",
+      hint: "select pg_sleep(0); -- shockwave",
+      action: onShockwave,
+    },
+  ];
+
+  const filtered = commands.filter((c) =>
+    (c.label + " " + c.hint).toLowerCase().includes(query.toLowerCase())
+  );
+
+  useEffect(() => {
+    if (open) {
+      setQuery("");
+      setSelected(0);
+      setTimeout(() => inputRef.current?.focus(), 10);
+    }
+  }, [open]);
+
+  useEffect(() => setSelected(0), [query]);
+
+  if (!open) return null;
+
+  function run(cmd) {
+    cmd?.action?.();
+    onClose();
+  }
+
+  function onKeyDown(e) {
+    if (e.key === "Escape") {
+      onClose();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSelected((s) => Math.min(s + 1, filtered.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelected((s) => Math.max(s - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      run(filtered[selected]);
+    }
+  }
+
+  return (
+    <div className="palette-scrim" onClick={onClose}>
+      <div className="palette" onClick={(e) => e.stopPropagation()}>
+        <div className="palette-prompt">
+          <span className="palette-sigil">shadiq=#</span>
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder="search commands..."
+            aria-label="Command search"
+          />
+        </div>
+        <div className="palette-list" role="listbox">
+          {filtered.length === 0 && <div className="palette-empty">no matching command</div>}
+          {filtered.map((c, i) => (
+            <div
+              key={c.id}
+              role="option"
+              aria-selected={i === selected}
+              className={`palette-item ${i === selected ? "active" : ""}`}
+              onMouseEnter={() => setSelected(i)}
+              onClick={() => run(c)}
+            >
+              <span>{c.label}</span>
+              <span className="palette-hint">{c.hint}</span>
+            </div>
+          ))}
+        </div>
+        <div className="palette-foot">↑↓ navigate · ↵ run · esc close</div>
+      </div>
+    </div>
   );
 }
 
@@ -304,11 +597,15 @@ function getGlowTexture() {
 }
 
 /* ---------------- Three.js background ---------------- */
-function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
+function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, onSelectProject, activity, triggerRef }) {
   const mountRef = useRef(null);
   const shockwaveRef = useRef({ time: 100, x: 0, y: 0, active: false });
   const scrollVelocity = useRef(0);
   const lastScrollY = useRef(0);
+  const activityRef = useRef(activity);
+  useEffect(() => {
+    activityRef.current = activity;
+  }, [activity]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -328,6 +625,15 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
     const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 100);
     camera.position.set(0, 0, 9);
 
+    // A designed flythrough path rather than a straight dolly — scroll
+    // position samples along this curve instead of lerping z/y directly.
+    const cameraCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(0, 0, 9),
+      new THREE.Vector3(0.6, -0.3, 5.5),
+      new THREE.Vector3(-0.4, -0.9, 1.5),
+      new THREE.Vector3(0, -1.4, -4),
+    ]);
+
     let renderer;
     try {
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -339,12 +645,58 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     mount.appendChild(renderer.domElement);
 
+    // Manual post-processing pass (no examples/jsm dependency): render the
+    // scene to a target, then composite through a single shader doing a
+    // touch of chromatic aberration, a vignette, and film grain.
+    const renderTarget = new THREE.WebGLRenderTarget(width, height, { samples: 4 });
+    const postScene = new THREE.Scene();
+    const postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const postMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tDiffuse: { value: renderTarget.texture },
+        uTime: { value: 0 },
+        uResolution: { value: new THREE.Vector2(width, height) },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform float uTime;
+        uniform vec2 uResolution;
+        varying vec2 vUv;
+        float hash(vec2 p) { return fract(sin(dot(p, vec2(41.0, 289.0))) * 43758.5453); }
+        void main() {
+          vec2 uv = vUv;
+          vec2 center = uv - 0.5;
+          float dist = length(center);
+          vec2 dir = dist > 0.0001 ? normalize(center) : vec2(0.0);
+          float aberration = dist * 0.004;
+          float r = texture2D(tDiffuse, uv - dir * aberration).r;
+          float g = texture2D(tDiffuse, uv).g;
+          float b = texture2D(tDiffuse, uv + dir * aberration).b;
+          vec3 color = vec3(r, g, b);
+          float vignette = smoothstep(0.9, 0.25, dist);
+          color *= mix(0.5, 1.0, vignette);
+          float grain = (hash(uv * uResolution.xy + uTime) - 0.5) * 0.035;
+          color += grain;
+          gl_FragColor = vec4(color, 1.0);
+        }
+      `,
+    });
+    const postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), postMaterial);
+    postScene.add(postQuad);
+
     const world = new THREE.Group();
     scene.add(world);
 
     // --- schema graph: nodes + edges + traveling "query" pulses ---
     const NODE_COUNT = 22;
-    const HUB_COUNT = 3; // rust-tinted "hub" tables
+    const HUB_COUNT = Math.min(PROJECTS.length, NODE_COUNT); // one hub per featured project
 
     // Fibonacci-sphere base layout, jittered so it reads as an organic
     // network rather than a perfect sphere.
@@ -397,8 +749,14 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
     const lines = new THREE.LineSegments(lineGeo, lineMat);
     graph.add(lines);
 
-    const hubIndices = new Set();
-    while (hubIndices.size < HUB_COUNT) hubIndices.add(Math.floor(Math.random() * NODE_COUNT));
+    // hubOrder is an ordered array (not just a Set) so each hub can carry
+    // a stable index into PROJECTS — clicking a hub node navigates there.
+    const hubOrder = [];
+    while (hubOrder.length < HUB_COUNT) {
+      const idx = Math.floor(Math.random() * NODE_COUNT);
+      if (!hubOrder.includes(idx)) hubOrder.push(idx);
+    }
+    const hubIndices = new Set(hubOrder);
     const nodeGeo = new THREE.IcosahedronGeometry(0.065, 1);
     const nodes = nodePositions.map((pos, i) => {
       const isHub = hubIndices.has(i);
@@ -410,7 +768,13 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
       const mesh = new THREE.Mesh(nodeGeo, mat);
       mesh.position.copy(pos);
       mesh.scale.setScalar(isHub ? 1.6 : 1);
-      mesh.userData = { baseScale: isHub ? 1.6 : 1, baseOpacity: isHub ? 0.9 : 0.7, isHub, index: i };
+      mesh.userData = {
+        baseScale: isHub ? 1.6 : 1,
+        baseOpacity: isHub ? 0.9 : 0.7,
+        isHub,
+        index: i,
+        projectIndex: isHub ? hubOrder.indexOf(i) : -1,
+      };
 
       const halo = new THREE.Sprite(
         new THREE.SpriteMaterial({
@@ -454,6 +818,12 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
       graph.add(dot);
       return dot;
     });
+
+    // Floating HTML label that names a hub node's project on hover —
+    // the affordance that tells you the graph is clickable, not just pretty.
+    const nodeLabel = document.createElement("div");
+    nodeLabel.className = "node-label";
+    mount.appendChild(nodeLabel);
 
     // --- particle field ---
     const particleCount = 260;
@@ -510,15 +880,64 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
     }
     window.addEventListener("pointermove", onPointerMove);
 
-    function onClick(e) {
-      shockwaveRef.current = {
-        time: 0,
-        x: (e.clientX / window.innerWidth) * 2 - 1,
-        y: -(e.clientY / window.innerHeight) * 2 + 1,
-        active: true
-      };
+    function fireShockwave(nx, ny) {
+      shockwaveRef.current = { time: 0, x: nx, y: ny, active: true };
     }
-    window.addEventListener("click", onClick);
+    if (triggerRef) triggerRef.current = fireShockwave;
+
+    // Drag rotates the graph manually; a plain click (no drag) fires the
+    // shockwave and, if it lands on a hub node, navigates to its project.
+    // Both are scoped to clicks that land on empty background (not real
+    // content) so they never fight text selection or button/link clicks.
+    function isBackgroundTarget(target) {
+      return !target.closest(
+        "a, button, input, p, h1, h2, h3, li, .panel, .now-card, .project, .skill-chip, .tag, .nav, .palette-scrim, .boot-loader"
+      );
+    }
+
+    const manualRotation = { x: 0, y: 0 };
+    let dragging = false;
+    let dragIsBackground = false;
+    let dragLast = null;
+    let dragTotal = 0;
+
+    function onPointerDown(e) {
+      dragIsBackground = isBackgroundTarget(e.target);
+      if (!dragIsBackground) return;
+      e.preventDefault();
+      dragging = true;
+      dragLast = { x: e.clientX, y: e.clientY };
+      dragTotal = 0;
+    }
+    function onPointerDrag(e) {
+      if (!dragging || !dragLast) return;
+      const dx = e.clientX - dragLast.x;
+      const dy = e.clientY - dragLast.y;
+      dragTotal += Math.abs(dx) + Math.abs(dy);
+      manualRotation.y += dx * 0.003;
+      manualRotation.x += dy * 0.003;
+      dragLast = { x: e.clientX, y: e.clientY };
+    }
+    function onPointerUp(e) {
+      const wasDrag = dragTotal > 6;
+      const wasBackground = dragIsBackground;
+      dragging = false;
+      dragLast = null;
+      if (wasDrag || !wasBackground) return;
+
+      const nx = (e.clientX / window.innerWidth) * 2 - 1;
+      const ny = -(e.clientY / window.innerHeight) * 2 + 1;
+      fireShockwave(nx, ny);
+
+      raycaster.setFromCamera({ x: nx, y: ny }, camera);
+      const hit = raycaster.intersectObjects(nodes)[0];
+      if (hit && hit.object.userData.isHub && onSelectProject) {
+        onSelectProject(hit.object.userData.projectIndex);
+      }
+    }
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointermove", onPointerDrag);
+    window.addEventListener("pointerup", onPointerUp);
 
     function onScroll() {
       const currentY = window.scrollY;
@@ -533,6 +952,8 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
+      renderTarget.setSize(width, height);
+      postMaterial.uniforms.uResolution.value.set(width, height);
     }
     window.addEventListener("resize", onResize);
 
@@ -576,13 +997,30 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
       graph.rotation.y = t * 0.05 * motion + scroll * Math.PI * 1.2;
       graph.rotation.x = t * 0.02 * motion + scroll * 0.5;
 
+      // Real GitHub activity subtly speeds up every pulse — the graph is
+      // meant to look busier when there's actually been recent commit activity.
+      const activityBoost = 1 + (activityRef.current || 0) * 0.6;
+
       pulses.forEach((p, i) => {
         const boosted = activeEdges && activeEdges.has(i);
-        p.userData.phase += 0.0035 * (boosted ? 2.4 : 1) * motion;
+        p.userData.phase += 0.0035 * (boosted ? 2.4 : 1) * activityBoost * motion;
         if (p.userData.phase > 1) p.userData.phase -= 1;
         p.position.lerpVectors(nodePositions[p.userData.a], nodePositions[p.userData.b], p.userData.phase);
         p.material.opacity = THREE.MathUtils.lerp(p.material.opacity, boosted ? 0.95 : 0.55, 0.1);
       });
+
+      // Hover label: names the project a hub node links to.
+      if (hoveredNode && hoveredNode.userData.isHub) {
+        const screenPos = hoveredNode.getWorldPosition(new THREE.Vector3()).project(camera);
+        const lx = (screenPos.x * 0.5 + 0.5) * width;
+        const ly = (-screenPos.y * 0.5 + 0.5) * height;
+        const project = PROJECTS[hoveredNode.userData.projectIndex];
+        nodeLabel.textContent = project ? project.title : "";
+        nodeLabel.style.transform = `translate(${lx}px, ${ly - 26}px)`;
+        nodeLabel.style.opacity = project ? "1" : "0";
+      } else {
+        nodeLabel.style.opacity = "0";
+      }
 
       particles.rotation.y = t * 0.012 * motion;
 
@@ -676,24 +1114,35 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
           particles.geometry.attributes.position.needsUpdate = true;
       }
 
-      world.rotation.y += (pointer.x * 0.15 - world.rotation.y) * 0.02;
-      world.rotation.x += (pointer.y * 0.1 - world.rotation.x) * 0.02;
+      world.rotation.y += (pointer.x * 0.15 + manualRotation.y - world.rotation.y) * 0.06;
+      world.rotation.x += (pointer.y * 0.1 + manualRotation.x - world.rotation.x) * 0.06;
 
-      camera.position.z = 9 - scroll * 13;
-      camera.position.y = -scroll * 1.4;
+      const camPoint = cameraCurve.getPointAt(Math.min(Math.max(scroll, 0), 1));
+      camera.position.copy(camPoint);
+      camera.rotation.z = Math.sin(scroll * Math.PI) * 0.035 * motion;
 
+      renderer.setRenderTarget(renderTarget);
       renderer.render(scene, camera);
+      renderer.setRenderTarget(null);
+      postMaterial.uniforms.uTime.value = t;
+      renderer.render(postScene, postCamera);
     }
     animate();
 
     return () => {
       cancelAnimationFrame(raf);
+      if (triggerRef) triggerRef.current = null;
       window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("click", onClick);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerDrag);
+      window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("scroll", onScroll);
       window.removeEventListener("resize", onResize);
       if (renderer.domElement.parentNode === mount) {
         mount.removeChild(renderer.domElement);
+      }
+      if (nodeLabel.parentNode === mount) {
+        mount.removeChild(nodeLabel);
       }
       lineGeo.dispose();
       lineMat.dispose();
@@ -709,6 +1158,9 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
         d.geometry.dispose();
         d.material.dispose();
       });
+      renderTarget.dispose();
+      postMaterial.dispose();
+      postQuad.geometry.dispose();
       renderer.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -768,6 +1220,27 @@ export default function Portfolio3D() {
   const [reducedMotion, setReducedMotion] = useState(false);
   const [webglOK, setWebglOK] = useState(true);
   const [activeSection, setActiveSection] = useState("work");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [soundOn, setSoundOn] = useState(false);
+  const shockwaveTriggerRef = useRef(null);
+  const githubActivity = useGithubActivity();
+  const activity = Math.min((githubActivity || 0) / 8, 1);
+
+  useAmbientDrone(soundOn, scrollRef);
+
+  useEffect(() => {
+    function onKey(e) {
+      const typing = document.activeElement?.tagName === "INPUT";
+      if ((e.key === "k" && (e.metaKey || e.ctrlKey)) || (e.key === "/" && !typing)) {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      } else if (e.key === "Escape") {
+        setPaletteOpen(false);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -811,6 +1284,11 @@ export default function Portfolio3D() {
   return (
     <div className="page">
       <style>{`
+        @property --ink-r {
+          syntax: '<percentage>';
+          inherits: false;
+          initial-value: 0%;
+        }
         :root {
           --ink: #0b0b0a;
           --paper: #f4f1e8;
@@ -821,15 +1299,55 @@ export default function Portfolio3D() {
         * { box-sizing: border-box; cursor: none; }
         html, body { background: var(--ink); }
 
-        /* Cursor glow */
-        .cursor-glow {
-          position: fixed; top: 0; left: 0; z-index: 9999;
-          width: 20px; height: 20px; border-radius: 50%;
-          background: radial-gradient(circle, rgba(122,43,34,0.9), rgba(122,43,34,0.3) 40%, transparent 70%);
+        /* Ink cursor */
+        .ink-cursor {
+          position: fixed; inset: 0; z-index: 9999;
           pointer-events: none; mix-blend-mode: screen;
-          box-shadow: 0 0 25px 8px rgba(122,43,34,0.25);
         }
         a, button { cursor: none; }
+
+        /* Node label (floating over the WebGL canvas) */
+        .node-label {
+          position: absolute; top: 0; left: 0; z-index: 5;
+          padding: 5px 10px; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase;
+          color: var(--paper); background: rgba(11,11,10,0.85); border: 1px solid var(--rust);
+          pointer-events: none; opacity: 0; transition: opacity 0.15s ease; white-space: nowrap;
+        }
+
+        /* Command palette */
+        .palette-scrim {
+          position: fixed; inset: 0; z-index: 200;
+          background: rgba(6,6,5,0.7); backdrop-filter: blur(2px);
+          display: flex; align-items: flex-start; justify-content: center;
+          padding-top: 14vh;
+        }
+        .palette {
+          width: min(560px, 90vw);
+          background: var(--charcoal); border: 1px solid #35332c;
+          box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+        }
+        .palette-prompt {
+          display: flex; align-items: center; gap: 10px;
+          padding: 16px 18px; border-bottom: 1px solid #2a2924;
+        }
+        .palette-sigil { color: var(--rust); font-size: 14px; }
+        .palette-prompt input {
+          flex: 1; background: none; border: none; outline: none;
+          color: var(--paper); font-family: inherit; font-size: 14px; cursor: text;
+        }
+        .palette-list { max-height: 50vh; overflow-y: auto; }
+        .palette-item {
+          display: flex; justify-content: space-between; gap: 16px;
+          padding: 12px 18px; font-size: 13.5px; cursor: pointer;
+        }
+        .palette-item.active { background: rgba(122,43,34,0.18); color: var(--rust); }
+        .palette-hint { color: var(--ash); font-size: 12px; }
+        .palette-item.active .palette-hint { color: inherit; opacity: 0.75; }
+        .palette-empty { padding: 16px 18px; color: var(--ash); font-size: 13px; }
+        .palette-foot {
+          padding: 10px 18px; border-top: 1px solid #2a2924;
+          font-size: 11px; letter-spacing: 0.05em; color: var(--ash);
+        }
         /* Boot Loader */
         .boot-loader {
           position: fixed; inset: 0; z-index: 99999;
@@ -899,7 +1417,15 @@ export default function Portfolio3D() {
           padding: 22px clamp(20px, 5vw, 56px);
           font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase;
         }
+        .nav-left { display: flex; align-items: center; gap: 12px; }
         .nav-mark { font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 20px; letter-spacing: 0.02em; }
+        .nav-util {
+          background: none; border: 1px solid #35332c; color: var(--ash);
+          font-family: inherit; font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+          padding: 5px 10px; border-radius: 100px; cursor: pointer; transition: border-color 0.2s ease, color 0.2s ease;
+        }
+        .nav-util:hover, .nav-util[aria-pressed="true"] { border-color: var(--rust); color: var(--rust); }
+        @media (max-width: 560px) { .nav-util { display: none; } }
         .nav-links { display: flex; gap: 28px; }
         .nav-link { position: relative; opacity: 0.72; padding-bottom: 4px; transition: opacity 0.2s ease, color 0.2s ease; }
         .nav-link:hover { opacity: 1; }
@@ -928,6 +1454,15 @@ export default function Portfolio3D() {
         .hero-letter-in { opacity: 1; transform: translateY(0) rotateX(0deg); }
         .hero-role { margin-top: 26px; max-width: 620px; font-size: clamp(15px, 2vw, 18px); line-height: 1.7; padding: 18px 22px; }
         .hero-role .ash { color: var(--ash); }
+        .github-pulse {
+          display: flex; align-items: center; gap: 8px; margin-top: 18px;
+          font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ash);
+        }
+        .pulse-dot {
+          width: 7px; height: 7px; border-radius: 50%; background: var(--rust);
+          box-shadow: 0 0 8px 2px rgba(122,43,34,0.6); animation: pulse-dot 1.8s ease-in-out infinite;
+        }
+        @keyframes pulse-dot { 0%, 100% { opacity: 0.4; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1); } }
         .scroll-cue { position: absolute; bottom: 34px; left: clamp(20px, 6vw, 64px); font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ash); display: flex; align-items: center; gap: 10px; }
         .scroll-cue .line { width: 34px; height: 1px; background: var(--ash); position: relative; overflow: hidden; }
         .scroll-cue .line::after { content: ""; position: absolute; inset: 0; background: var(--paper); animation: slide 1.8s ease-in-out infinite; }
@@ -943,7 +1478,22 @@ export default function Portfolio3D() {
         .section-divider svg { width: 100%; height: 4px; }
         .divider-line { stroke: var(--rust); stroke-width: 1; opacity: 0.5; stroke-dasharray: 800; stroke-dashoffset: 800; transition: stroke-dashoffset 1.5s cubic-bezier(0.16,1,0.3,1); }
         .divider-line.drawn { stroke-dashoffset: 0; }
-        .section-head { display: flex; align-items: baseline; gap: 18px; margin-bottom: 54px; }
+        .section-head {
+          display: flex; align-items: baseline; gap: 18px; margin-bottom: 54px;
+          --ink-r: 0%;
+          mask-image:
+            radial-gradient(circle at 10% 60%, black 0%, black var(--ink-r), transparent calc(var(--ink-r) + 22%)),
+            radial-gradient(circle at 55% 30%, black 0%, black var(--ink-r), transparent calc(var(--ink-r) + 26%)),
+            radial-gradient(circle at 85% 70%, black 0%, black var(--ink-r), transparent calc(var(--ink-r) + 20%));
+          -webkit-mask-image:
+            radial-gradient(circle at 10% 60%, black 0%, black var(--ink-r), transparent calc(var(--ink-r) + 22%)),
+            radial-gradient(circle at 55% 30%, black 0%, black var(--ink-r), transparent calc(var(--ink-r) + 26%)),
+            radial-gradient(circle at 85% 70%, black 0%, black var(--ink-r), transparent calc(var(--ink-r) + 20%));
+          mask-composite: add;
+          -webkit-mask-composite: source-over;
+          transition: opacity 0.7s ease, transform 0.7s ease, --ink-r 0.9s cubic-bezier(.2,.7,.2,1);
+        }
+        .section-head.in-view { --ink-r: 140%; }
         .section-num { color: var(--rust); font-size: 13px; letter-spacing: 0.1em; }
         .section-title { font-size: clamp(34px, 5vw, 56px); margin: 0; }
 
@@ -1030,13 +1580,27 @@ export default function Portfolio3D() {
       `}</style>
 
       <BootLoader />
-      <CursorGlow />
+      <InkCursor />
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        onNavigate={(id) => {
+          setPaletteOpen(false);
+          scrollToSection(id);
+        }}
+        soundOn={soundOn}
+        onToggleSound={() => setSoundOn((v) => !v)}
+        onShockwave={() => shockwaveTriggerRef.current?.(0, 0)}
+      />
 
       {webglOK ? (
         <ThreeBackground
           scrollRef={scrollRef}
           reducedMotion={reducedMotion}
           onUnavailable={() => setWebglOK(false)}
+          onSelectProject={(i) => scrollToSection(`project-${i}`)}
+          activity={activity}
+          triggerRef={shockwaveTriggerRef}
         />
       ) : (
         <>
@@ -1050,7 +1614,20 @@ export default function Portfolio3D() {
 
       <div className="content">
         <nav className="nav">
-          <span className="nav-mark">SHADIQ /</span>
+          <div className="nav-left">
+            <span className="nav-mark">SHADIQ /</span>
+            <button className="nav-util" onClick={() => setPaletteOpen(true)} aria-label="Open command menu">
+              ⌘K
+            </button>
+            <button
+              className="nav-util"
+              onClick={() => setSoundOn((v) => !v)}
+              aria-pressed={soundOn}
+              aria-label="Toggle ambient sound"
+            >
+              {soundOn ? "SND ON" : "SND OFF"}
+            </button>
+          </div>
           <button className="nav-toggle" onClick={() => setNavOpen((v) => !v)}>
             {navOpen ? "Close" : "Menu"}
           </button>
@@ -1085,6 +1662,7 @@ export default function Portfolio3D() {
               one no matter what I'm building.
             </span>
           </p>
+          <GithubPulse count={githubActivity} />
           <div className="scroll-cue">
             <span className="line" />
             Scroll
@@ -1098,7 +1676,7 @@ export default function Portfolio3D() {
           </Reveal>
           <div>
             {PROJECTS.map((p, i) => (
-              <Reveal as="article" className="project-wrapper" delay={i * 60} key={p.title}>
+              <Reveal as="article" id={`project-${i}`} className="project-wrapper" delay={i * 60} key={p.title}>
                 <TiltCard className="project panel">
                   <div className="project-top">
                     <h3 className="project-title display">{p.title}</h3>
