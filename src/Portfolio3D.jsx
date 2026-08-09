@@ -1,0 +1,1245 @@
+import React, { useEffect, useRef, useState } from "react";
+import * as THREE from "three";
+import katawareImg from "./assets/kataware.jpg";
+
+/* ---------------------------------------------------------
+   DESIGN NOTES (for Shadiq, not rendered)
+
+   The background reads as a schema/query graph rather than
+   abstract decoration — a nod to the actual work (databases,
+   retrieval pipelines, "trust layers"):
+
+   - ~20 nodes laid out on a jittered Fibonacci sphere, wired
+     to their 2 nearest neighbours so the mesh reads as an
+     organic ER-diagram rather than a perfect geometric shape.
+     A few nodes are tinted rust as "hub" tables.
+   - Small glowing sprites travel back and forth along each
+     edge on a loop, standing in for a query moving across
+     joins. Hovering a node speeds up the pulses on its edges.
+   - Camera dollies backward and the graph rotates as you
+     scroll — rotation encodes read progress, not decoration.
+   - A soft particle field gives depth/grain; fast scrolling
+     briefly swells the whole graph.
+   - Pointer position adds gentle parallax to the whole scene.
+
+   Content sits in normal document flow (real scroll, no
+   scroll-jacking) on top of a fixed full-viewport canvas —
+   so it stays accessible and works with reduced-motion.
+--------------------------------------------------------- */
+
+const FONT_LINK_ID = "shadiq-portfolio-fonts";
+const PAPER = 0xf4f1e8;
+const RUST = 0x7a2b22;
+
+function useGoogleFonts() {
+  useEffect(() => {
+    if (document.getElementById(FONT_LINK_ID)) return;
+    const link = document.createElement("link");
+    link.id = FONT_LINK_ID;
+    link.rel = "stylesheet";
+    link.href =
+      "https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap";
+    document.head.appendChild(link);
+  }, []);
+}
+
+/* ---------- Cursor Glow (HTML layer) ---------- */
+function CursorGlow() {
+  const dotRef = useRef(null);
+  useEffect(() => {
+    const dot = dotRef.current;
+    if (!dot) return;
+    let mx = -100, my = -100;
+    function onMove(e) { mx = e.clientX; my = e.clientY; }
+    function tick() {
+      dot.style.transform = `translate(${mx - 10}px, ${my - 10}px)`;
+      requestAnimationFrame(tick);
+    }
+    window.addEventListener("pointermove", onMove);
+    tick();
+    return () => window.removeEventListener("pointermove", onMove);
+  }, []);
+  return <div ref={dotRef} className="cursor-glow" aria-hidden="true" />;
+}
+
+/* ---------- Hero Title (staggered letters) ---------- */
+function HeroTitle({ text }) {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setVisible(true), 300); return () => clearTimeout(t); }, []);
+  return (
+    <h1 className="hero-name display">
+      {text.split("").map((ch, i) => (
+        <span
+          key={i}
+          className={`hero-letter ${visible ? "hero-letter-in" : ""}`}
+          style={{ transitionDelay: `${i * 70 + 100}ms` }}
+        >
+          {ch}
+        </span>
+      ))}
+    </h1>
+  );
+}
+
+/* ---------- Tilt Card ---------- */
+function TiltCard({ children, className = "" }) {
+  const ref = useRef(null);
+  function onMove(e) {
+    const el = ref.current; if (!el) return;
+    const r = el.getBoundingClientRect();
+    const x = ((e.clientX - r.left) / r.width - 0.5) * 2;
+    const y = ((e.clientY - r.top) / r.height - 0.5) * 2;
+    el.style.transform = `perspective(800px) rotateY(${x * 4}deg) rotateX(${-y * 4}deg) scale(1.02)`;
+  }
+  function onLeave() { if (ref.current) ref.current.style.transform = ""; }
+  return (
+    <div ref={ref} className={className} onMouseMove={onMove} onMouseLeave={onLeave} onMouseEnter={playThock} style={{ transition: "transform 0.2s ease" }}>
+      {children}
+    </div>
+  );
+}
+
+/* ---------- Magnetic Link ---------- */
+function MagneticLink({ children, href, className = "", onClick }) {
+  const ref = useRef(null);
+  function onMove(e) {
+    const el = ref.current; if (!el) return;
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const dx = (e.clientX - cx) * 0.25;
+    const dy = (e.clientY - cy) * 0.25;
+    el.style.transform = `translate(${dx}px, ${dy}px)`;
+  }
+  function onLeave() { if (ref.current) ref.current.style.transform = ""; }
+  return (
+    <a ref={ref} href={href} className={className} onClick={onClick}
+       onMouseMove={onMove} onMouseLeave={onLeave} onMouseEnter={playThock}
+       style={{ transition: "transform 0.2s ease", display: "inline-block" }}>
+      {children}
+    </a>
+  );
+}
+
+/* ---------- Section Divider ---------- */
+function SectionDivider() {
+  const ref = useRef(null);
+  const [inView, setInView] = useState(false);
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const obs = new IntersectionObserver(([e]) => { if (e.isIntersecting) { setInView(true); obs.unobserve(el); } }, { threshold: 0.5 });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+  return (
+    <div ref={ref} className="section-divider">
+      <svg viewBox="0 0 800 4" preserveAspectRatio="none">
+        <line className={`divider-line ${inView ? "drawn" : ""}`} x1="0" y1="2" x2="800" y2="2" />
+      </svg>
+    </div>
+  );
+}
+
+/* ---------- Web Audio SFX ---------- */
+let audioCtx = null;
+function playThock() {
+  if (!window.AudioContext && !window.webkitAudioContext) return;
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(40, audioCtx.currentTime + 0.05);
+  
+  gain.gain.setValueAtTime(0, audioCtx.currentTime);
+  gain.gain.linearRampToValueAtTime(0.1, audioCtx.currentTime + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.05);
+  
+  osc.start(audioCtx.currentTime);
+  osc.stop(audioCtx.currentTime + 0.1);
+}
+
+/* ---------- Boot Sequence Loader ---------- */
+function BootLoader() {
+  const [booting, setBooting] = useState(true);
+  const [text, setText] = useState("");
+  useEffect(() => {
+    const msgs = ["INITIALIZING SYNC...", "LOADING TRUST LAYERS...", "SYSTEM READY."];
+    let i = 0;
+    const interval = setInterval(() => {
+      setText(msgs[i]);
+      i++;
+      if (i >= msgs.length) {
+        clearInterval(interval);
+        setTimeout(() => setBooting(false), 500);
+      }
+    }, 400);
+    return () => clearInterval(interval);
+  }, []);
+  
+  if (!booting) return null;
+  return (
+    <div className="boot-loader">
+      <div className="boot-text">
+        {text}<span className="boot-cursor">_</span>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Hacker Text Scramble ---------- */
+function ScrambleText({ text, className = "" }) {
+  const [displayText, setDisplayText] = useState(text.replace(/./g, '_'));
+  const ref = useRef(null);
+  
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        obs.unobserve(el);
+        let iteration = 0;
+        const chars = "01!@#$%^&*()_+<>?[]{}";
+        const interval = setInterval(() => {
+          setDisplayText(text.split("").map((letter, index) => {
+            if(index < iteration) return text[index];
+            if(text[index] === " ") return " ";
+            return chars[Math.floor(Math.random() * chars.length)];
+          }).join(""));
+          if(iteration >= text.length) clearInterval(interval);
+          iteration += 1 / 3; 
+        }, 30);
+      }
+    }, { threshold: 0.1 });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [text]);
+  
+  return <h2 ref={ref} className={className}>{displayText}</h2>;
+}
+
+function Reveal({ as: Tag = "div", className = "", children, delay = 0, style = {} }) {
+  const ref = useRef(null);
+  const [inView, setInView] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            setInView(true);
+            obs.unobserve(el);
+          }
+        });
+      },
+      { threshold: 0.2 }
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+  return (
+    <Tag
+      ref={ref}
+      className={`reveal ${inView ? "in-view" : ""} ${className}`}
+      style={{ ...style, transitionDelay: inView ? `${delay}ms` : "0ms" }}
+    >
+      {children}
+    </Tag>
+  );
+}
+
+function BrushUnderline() {
+  return (
+    <svg className="brush-underline" viewBox="0 0 340 20" preserveAspectRatio="none" aria-hidden="true">
+      <path
+        className="brush-path"
+        d="M4 12 C 60 2, 90 18, 150 9 S 230 3, 280 13 S 320 15, 336 10"
+        fill="none"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/* Cheap, dependency-free check for whether WebGL is actually usable —
+   Brave Shields, disabled hardware acceleration, or a blocked GPU can
+   all make context creation fail even though Three.js itself is fine. */
+function isWebGLAvailable() {
+  try {
+    const canvas = document.createElement("canvas");
+    const gl =
+      canvas.getContext("webgl2") ||
+      canvas.getContext("webgl") ||
+      canvas.getContext("experimental-webgl");
+    return !!gl;
+  } catch (e) {
+    return false;
+  }
+}
+
+/* Small radial-gradient sprite texture, generated once and shared across
+   every node halo / pulse — cheaper than a canvas per sprite. */
+let glowTexture = null;
+function getGlowTexture() {
+  if (glowTexture) return glowTexture;
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  gradient.addColorStop(0, "rgba(255,255,255,1)");
+  gradient.addColorStop(0.4, "rgba(255,255,255,0.4)");
+  gradient.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+  glowTexture = new THREE.CanvasTexture(canvas);
+  return glowTexture;
+}
+
+/* ---------------- Three.js background ---------------- */
+function ThreeBackground({ scrollRef, reducedMotion, onUnavailable }) {
+  const mountRef = useRef(null);
+  const shockwaveRef = useRef({ time: 100, x: 0, y: 0, active: false });
+  const scrollVelocity = useRef(0);
+  const lastScrollY = useRef(0);
+
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return;
+
+    if (!isWebGLAvailable()) {
+      onUnavailable?.();
+      return;
+    }
+
+    let width = mount.clientWidth;
+    let height = mount.clientHeight;
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x0b0b0a, 0.05);
+
+    const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 100);
+    camera.position.set(0, 0, 9);
+
+    let renderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    } catch (e) {
+      onUnavailable?.();
+      return;
+    }
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    mount.appendChild(renderer.domElement);
+
+    const world = new THREE.Group();
+    scene.add(world);
+
+    // --- schema graph: nodes + edges + traveling "query" pulses ---
+    const NODE_COUNT = 22;
+    const HUB_COUNT = 3; // rust-tinted "hub" tables
+
+    // Fibonacci-sphere base layout, jittered so it reads as an organic
+    // network rather than a perfect sphere.
+    const nodePositions = [];
+    for (let i = 0; i < NODE_COUNT; i++) {
+      const y = 1 - (i / (NODE_COUNT - 1)) * 2;
+      const radiusAtY = Math.sqrt(Math.max(0, 1 - y * y));
+      const theta = i * Math.PI * (3 - Math.sqrt(5));
+      const baseRadius = 2.3 + Math.random() * 0.9;
+      const jitter = () => (Math.random() - 0.5) * 0.7;
+      nodePositions.push(
+        new THREE.Vector3(
+          Math.cos(theta) * radiusAtY * baseRadius + jitter(),
+          y * baseRadius * 0.9 + jitter(),
+          Math.sin(theta) * radiusAtY * baseRadius + jitter() - 2
+        )
+      );
+    }
+
+    // Connect each node to its 2 nearest neighbours — gives a natural,
+    // ER-diagram-like mesh instead of a fully-connected blob.
+    const edgeSet = new Set();
+    const edges = [];
+    nodePositions.forEach((p, i) => {
+      nodePositions
+        .map((q, j) => (i === j ? null : { j, d: p.distanceTo(q) }))
+        .filter(Boolean)
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 2)
+        .forEach(({ j }) => {
+          const key = i < j ? `${i}-${j}` : `${j}-${i}`;
+          if (!edgeSet.has(key)) {
+            edgeSet.add(key);
+            edges.push([i, j]);
+          }
+        });
+    });
+
+    const graph = new THREE.Group();
+    world.add(graph);
+
+    const linePositions = new Float32Array(edges.length * 6);
+    edges.forEach(([a, b], i) => {
+      linePositions.set([nodePositions[a].x, nodePositions[a].y, nodePositions[a].z], i * 6);
+      linePositions.set([nodePositions[b].x, nodePositions[b].y, nodePositions[b].z], i * 6 + 3);
+    });
+    const lineGeo = new THREE.BufferGeometry();
+    lineGeo.setAttribute("position", new THREE.BufferAttribute(linePositions, 3));
+    const lineMat = new THREE.LineBasicMaterial({ color: PAPER, transparent: true, opacity: 0.28 });
+    const lines = new THREE.LineSegments(lineGeo, lineMat);
+    graph.add(lines);
+
+    const hubIndices = new Set();
+    while (hubIndices.size < HUB_COUNT) hubIndices.add(Math.floor(Math.random() * NODE_COUNT));
+    const nodeGeo = new THREE.IcosahedronGeometry(0.065, 1);
+    const nodes = nodePositions.map((pos, i) => {
+      const isHub = hubIndices.has(i);
+      const mat = new THREE.MeshBasicMaterial({
+        color: isHub ? RUST : PAPER,
+        transparent: true,
+        opacity: isHub ? 0.9 : 0.7,
+      });
+      const mesh = new THREE.Mesh(nodeGeo, mat);
+      mesh.position.copy(pos);
+      mesh.scale.setScalar(isHub ? 1.6 : 1);
+      mesh.userData = { baseScale: isHub ? 1.6 : 1, baseOpacity: isHub ? 0.9 : 0.7, isHub, index: i };
+
+      const halo = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: getGlowTexture(),
+          color: isHub ? RUST : PAPER,
+          transparent: true,
+          opacity: isHub ? 0.5 : 0.28,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      halo.scale.setScalar(isHub ? 0.9 : 0.5);
+      mesh.add(halo);
+      mesh.userData.halo = halo;
+
+      graph.add(mesh);
+      return mesh;
+    });
+
+    // adjacency: which edges touch which node, so a hover can light up
+    // the joins running through it
+    const adjacency = nodes.map(() => []);
+    edges.forEach(([a, b], i) => {
+      adjacency[a].push(i);
+      adjacency[b].push(i);
+    });
+
+    // traveling pulses: one glowing sprite per edge, looping start -> end
+    const pulses = edges.map(([a, b]) => {
+      const mat = new THREE.SpriteMaterial({
+        map: getGlowTexture(),
+        color: RUST,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const dot = new THREE.Sprite(mat);
+      dot.scale.setScalar(0.22);
+      dot.userData = { a, b, phase: Math.random() };
+      graph.add(dot);
+      return dot;
+    });
+
+    // --- particle field ---
+    const particleCount = 260;
+    const positions = new Float32Array(particleCount * 3);
+    const originalPositions = new Float32Array(particleCount * 3);
+    for (let i = 0; i < particleCount; i++) {
+      const px = (Math.random() - 0.5) * 22;
+      const py = (Math.random() - 0.5) * 15;
+      const pz = (Math.random() - 0.5) * 32 - 6;
+      positions[i * 3] = px;
+      positions[i * 3 + 1] = py;
+      positions[i * 3 + 2] = pz;
+      originalPositions[i * 3] = px;
+      originalPositions[i * 3 + 1] = py;
+      originalPositions[i * 3 + 2] = pz;
+    }
+    const particleGeo = new THREE.BufferGeometry();
+    particleGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    const particleMat = new THREE.PointsMaterial({
+      color: PAPER,
+      size: 0.022,
+      transparent: true,
+      opacity: 0.45,
+      sizeAttenuation: true,
+    });
+    const particles = new THREE.Points(particleGeo, particleMat);
+    world.add(particles);
+
+    // --- cursor trail ---
+    const trailCount = 18;
+    const trailDots = [];
+    for (let i = 0; i < trailCount; i++) {
+       const dotGeo = new THREE.CircleGeometry(0.045 * (1 - i/trailCount), 12);
+       const dotMat = new THREE.MeshBasicMaterial({ 
+           color: RUST, 
+           transparent: true, 
+           opacity: 0.8 * (1 - i/trailCount),
+           depthTest: false,
+           depthWrite: false
+       });
+       const dot = new THREE.Mesh(dotGeo, dotMat);
+       dot.renderOrder = 999;
+       dot.position.set(0, 0, -100);
+       scene.add(dot);
+       trailDots.push(dot);
+    }
+
+    // --- pointer parallax & interactions ---
+    const pointer = { x: 0, y: 0 };
+    const raycaster = new THREE.Raycaster();
+    function onPointerMove(e) {
+      pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
+      pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    }
+    window.addEventListener("pointermove", onPointerMove);
+
+    function onClick(e) {
+      shockwaveRef.current = {
+        time: 0,
+        x: (e.clientX / window.innerWidth) * 2 - 1,
+        y: -(e.clientY / window.innerHeight) * 2 + 1,
+        active: true
+      };
+    }
+    window.addEventListener("click", onClick);
+
+    function onScroll() {
+      const currentY = window.scrollY;
+      scrollVelocity.current = currentY - lastScrollY.current;
+      lastScrollY.current = currentY;
+    }
+    window.addEventListener("scroll", onScroll, { passive: true });
+
+    function onResize() {
+      width = mount.clientWidth;
+      height = mount.clientHeight;
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      renderer.setSize(width, height);
+    }
+    window.addEventListener("resize", onResize);
+
+    let raf;
+    const clock = new THREE.Clock();
+
+    function animate() {
+      raf = requestAnimationFrame(animate);
+      const t = clock.getElapsedTime();
+      const scroll = scrollRef.current || 0;
+      const motion = reducedMotion ? 0.15 : 1;
+
+      // Update raycaster for interactions
+      raycaster.setFromCamera(pointer, camera);
+
+      // Hover a node -> it grows/brightens and the joins running through
+      // it (its edges' traveling pulses) speed up, like a query touching it.
+      const nodeIntersects = reducedMotion ? [] : raycaster.intersectObjects(nodes);
+      const hoveredNode = nodeIntersects.length > 0 ? nodeIntersects[0].object : null;
+      const activeEdges = hoveredNode ? new Set(adjacency[hoveredNode.userData.index]) : null;
+
+      nodes.forEach((n) => {
+        const isHovered = n === hoveredNode;
+        const targetScale = n.userData.baseScale * (isHovered ? 1.6 : 1);
+        n.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.12);
+        n.material.opacity = THREE.MathUtils.lerp(n.material.opacity, isHovered ? 1 : n.userData.baseOpacity, 0.1);
+        n.userData.halo.material.opacity = THREE.MathUtils.lerp(
+          n.userData.halo.material.opacity,
+          isHovered ? 0.85 : n.userData.isHub ? 0.5 : 0.28,
+          0.1
+        );
+      });
+
+      // Fast scrolling briefly swells the whole graph, echoing a burst of
+      // query activity rather than a static rotation.
+      scrollVelocity.current *= 0.9;
+      const velocityDistort = Math.min(Math.abs(scrollVelocity.current) * 0.003, 0.25);
+      const targetGraphScale = 1 + velocityDistort;
+      graph.scale.lerp(new THREE.Vector3(targetGraphScale, targetGraphScale, targetGraphScale), 0.08);
+
+      graph.rotation.y = t * 0.05 * motion + scroll * Math.PI * 1.2;
+      graph.rotation.x = t * 0.02 * motion + scroll * 0.5;
+
+      pulses.forEach((p, i) => {
+        const boosted = activeEdges && activeEdges.has(i);
+        p.userData.phase += 0.0035 * (boosted ? 2.4 : 1) * motion;
+        if (p.userData.phase > 1) p.userData.phase -= 1;
+        p.position.lerpVectors(nodePositions[p.userData.a], nodePositions[p.userData.b], p.userData.phase);
+        p.material.opacity = THREE.MathUtils.lerp(p.material.opacity, boosted ? 0.95 : 0.55, 0.1);
+      });
+
+      particles.rotation.y = t * 0.012 * motion;
+
+      // Compute world mouse position for interactions
+      let mousePos;
+      if (!reducedMotion) {
+          const vector = new THREE.Vector3(pointer.x, pointer.y, 0.5);
+          vector.unproject(camera);
+          const dir = vector.sub(camera.position).normalize();
+          const distance = (0 - camera.position.z) / dir.z; 
+          mousePos = camera.position.clone().add(dir.multiplyScalar(distance));
+          
+          // Update cursor trail
+          if (trailDots[0].position.z === -100) {
+              trailDots.forEach(d => d.position.copy(mousePos));
+          } else {
+              trailDots[0].position.copy(mousePos);
+              for (let i = 1; i < trailCount; i++) {
+                 trailDots[i].position.lerp(trailDots[i-1].position, 0.45);
+              }
+          }
+      }
+
+      // Compute shockwave position outside the loop
+      let shockwavePos = null;
+      if (!reducedMotion && shockwaveRef.current.active) {
+          const vector = new THREE.Vector3(shockwaveRef.current.x, shockwaveRef.current.y, 0.5);
+          vector.unproject(camera);
+          const dir = vector.sub(camera.position).normalize();
+          const distance = (0 - camera.position.z) / dir.z; 
+          shockwavePos = camera.position.clone().add(dir.multiplyScalar(distance));
+          world.worldToLocal(shockwavePos);
+          
+          shockwaveRef.current.time += 0.02; 
+          if (shockwaveRef.current.time > 1.0) shockwaveRef.current.active = false; 
+      }
+
+      // Particle Repulsion Logic
+      if (!reducedMotion && mousePos) {
+          const localMousePos = mousePos.clone();
+          world.worldToLocal(localMousePos);
+
+          const particlePositions = particles.geometry.attributes.position.array;
+          for (let i = 0; i < particleCount; i++) {
+             const ix = i * 3;
+             const iy = i * 3 + 1;
+             const iz = i * 3 + 2;
+             
+             const ox = originalPositions[ix];
+             const oy = originalPositions[iy];
+             const oz = originalPositions[iz];
+             
+             const dx = ox - localMousePos.x;
+             const dy = oy - localMousePos.y;
+             const dz = oz - localMousePos.z;
+             const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+             
+             let tx = ox;
+             let ty = oy;
+             let tz = oz;
+
+             const repulseRadius = 4.0;
+             if (dist < repulseRadius && dist > 0) {
+                 const force = (repulseRadius - dist) / repulseRadius;
+                 tx = ox + (dx / dist) * force * 2.0;
+                 ty = oy + (dy / dist) * force * 2.0;
+                 tz = oz + (dz / dist) * force * 2.0;
+             }
+
+             // Shockwave effect
+             if (shockwavePos) {
+                 const sdx = tx - shockwavePos.x;
+                 const sdy = ty - shockwavePos.y;
+                 const sdz = tz - shockwavePos.z;
+                 const sdist = Math.sqrt(sdx*sdx + sdy*sdy + sdz*sdz);
+                 
+                 const swRadius = shockwaveRef.current.time * 30.0; // ring expands fast
+                 const swThickness = 3.0;
+                 if (sdist > 0 && Math.abs(sdist - swRadius) < swThickness) {
+                     const sforce = (1 - Math.abs(sdist - swRadius) / swThickness) * 8.0; 
+                     tx += (sdx / sdist) * sforce;
+                     ty += (sdy / sdist) * sforce;
+                     tz += (sdz / sdist) * sforce;
+                 }
+             }
+
+             particlePositions[ix] += (tx - particlePositions[ix]) * 0.1;
+             particlePositions[iy] += (ty - particlePositions[iy]) * 0.1;
+             particlePositions[iz] += (tz - particlePositions[iz]) * 0.1;
+          }
+          particles.geometry.attributes.position.needsUpdate = true;
+      }
+
+      world.rotation.y += (pointer.x * 0.15 - world.rotation.y) * 0.02;
+      world.rotation.x += (pointer.y * 0.1 - world.rotation.x) * 0.02;
+
+      camera.position.z = 9 - scroll * 13;
+      camera.position.y = -scroll * 1.4;
+
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("click", onClick);
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onResize);
+      if (renderer.domElement.parentNode === mount) {
+        mount.removeChild(renderer.domElement);
+      }
+      lineGeo.dispose();
+      lineMat.dispose();
+      nodeGeo.dispose();
+      nodes.forEach((n) => {
+        n.material.dispose();
+        n.userData.halo.material.dispose();
+      });
+      pulses.forEach((p) => p.material.dispose());
+      particleGeo.dispose();
+      particleMat.dispose();
+      trailDots.forEach((d) => {
+        d.geometry.dispose();
+        d.material.dispose();
+      });
+      renderer.dispose();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return <div ref={mountRef} className="three-mount" />;
+}
+
+function scrollToSection(id) {
+  const el = document.getElementById(id);
+  if (el) {
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  } else {
+    window.location.hash = id;
+  }
+}
+
+/* ---------------- Content ---------------- */
+const NAV_LINKS = [
+  { id: "work", label: "Work" },
+  { id: "about", label: "About" },
+  { id: "now", label: "Off the Clock" },
+  { id: "contact", label: "Contact" },
+];
+
+const PROJECTS = [
+  {
+    title: "Kukhra",
+    tagline: "Inventory & POS for a poultry supply chain",
+    body: "A Django/DRF backend tracking chicken from farm production through warehouses to 12 retail outlets — append-only stock ledgers instead of mutable balances, dated price rows so old orders keep their original price, and lot-level tracing for recalls. Built with a co-founder as a side project, not a client engagement.",
+    tags: ["Django", "PostgreSQL", "Celery", "React"],
+  },
+  {
+    title: "InfraWatch",
+    tagline: "PostgreSQL control panel",
+    body: "A 9-page control panel — Dashboard, Activity, Slow Queries, Table Health, Indexes, Replication, Permissions, Schema, NOC Report — built to replace a manual DataGrip / Termius workflow with one live view of the database. A lighter companion tool tracks schema drift the same way, deployed on a phone over Termux out of pure stubbornness.",
+    tags: ["PostgreSQL", "Ops tooling", "SPA"],
+  },
+  {
+    title: "Company Onboarding FAQ Bot",
+    tagline: "RAG assistant for internal onboarding",
+    body: "A retrieval-augmented onboarding assistant running on pgvector for storage, nomic-embed-text via Ollama for embeddings, and llama3.1:8b as the local model, with a GLM API toggle planned alongside a minimal frontend.",
+    tags: ["RAG", "pgvector", "Ollama", "Llama 3.1"],
+  },
+  {
+    title: "Spotit",
+    tagline: "Cross-platform music, built fast",
+    body: "A Flutter music app with local recommendation logic and YouTube audio streaming — a full Home screen with discovery shelves, Hive-backed downloads, YouTube Music / Spotify import, and mobile hardening via audio_service. Mobile kept as a separate codebase from desktop to ship faster.",
+    tags: ["Flutter", "Hive", "audio_service"],
+  },
+];
+
+export default function Portfolio3D() {
+  useGoogleFonts();
+  const [navOpen, setNavOpen] = useState(false);
+  const scrollRef = useRef(0);
+  const [reducedMotion, setReducedMotion] = useState(false);
+  const [webglOK, setWebglOK] = useState(true);
+  const [activeSection, setActiveSection] = useState("work");
+
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    setReducedMotion(mq.matches);
+    const onChange = () => setReducedMotion(mq.matches);
+    mq.addEventListener?.("change", onChange);
+
+    function onScroll() {
+      const max = document.documentElement.scrollHeight - window.innerHeight;
+      scrollRef.current = max > 0 ? Math.min(1, Math.max(0, window.scrollY / max)) : 0;
+    }
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      mq.removeEventListener?.("change", onChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const ids = NAV_LINKS.map((l) => l.id);
+    const sections = ids
+      .map((id) => document.getElementById(id))
+      .filter(Boolean);
+    if (!sections.length) return;
+
+    const obs = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            setActiveSection(entry.target.id);
+          }
+        });
+      },
+      { rootMargin: "-45% 0px -45% 0px", threshold: 0 }
+    );
+    sections.forEach((s) => obs.observe(s));
+    return () => obs.disconnect();
+  }, []);
+
+  return (
+    <div className="page">
+      <style>{`
+        :root {
+          --ink: #0b0b0a;
+          --paper: #f4f1e8;
+          --ash: #8c887e;
+          --charcoal: #171613;
+          --rust: #7a2b22;
+        }
+        * { box-sizing: border-box; cursor: none; }
+        html, body { background: var(--ink); }
+
+        /* Cursor glow */
+        .cursor-glow {
+          position: fixed; top: 0; left: 0; z-index: 9999;
+          width: 20px; height: 20px; border-radius: 50%;
+          background: radial-gradient(circle, rgba(122,43,34,0.9), rgba(122,43,34,0.3) 40%, transparent 70%);
+          pointer-events: none; mix-blend-mode: screen;
+          box-shadow: 0 0 25px 8px rgba(122,43,34,0.25);
+        }
+        a, button { cursor: none; }
+        /* Boot Loader */
+        .boot-loader {
+          position: fixed; inset: 0; z-index: 99999;
+          background: var(--ink); color: var(--rust);
+          display: flex; align-items: center; justify-content: center;
+          font-family: 'IBM Plex Mono', monospace; font-size: 14px;
+        }
+        .boot-cursor { animation: blink 1s step-end infinite; }
+        @keyframes blink { 50% { opacity: 0; } }
+
+        .page {
+          background: var(--ink);
+          color: var(--paper);
+          font-family: 'IBM Plex Mono', monospace;
+          position: relative;
+        }
+        .three-mount {
+          position: fixed;
+          inset: 0;
+          z-index: 0;
+          pointer-events: none;
+        }
+        .three-mount canvas { display: block; width: 100% !important; height: 100% !important; }
+        .three-fallback {
+          position: fixed; inset: 0; z-index: 0; pointer-events: none;
+          background:
+            radial-gradient(ellipse at 50% 20%, rgba(244,241,232,0.06), transparent 60%),
+            var(--ink);
+        }
+        .webgl-note {
+          position: fixed; bottom: 14px; right: 14px; z-index: 41;
+          font-size: 11px; letter-spacing: 0.04em; color: var(--ash);
+          background: rgba(11,11,10,0.8); border: 1px solid #2a2924;
+          padding: 8px 12px; max-width: 240px; line-height: 1.5;
+        }
+
+        .content { position: relative; z-index: 1; }
+
+        .display {
+          font-family: 'Big Shoulders Display', sans-serif;
+          font-weight: 800;
+          text-transform: uppercase;
+          letter-spacing: 0.01em;
+          line-height: 0.86;
+        }
+        a { color: inherit; text-decoration: none; }
+
+        .panel {
+          background: rgba(11, 11, 10, 0.72);
+          backdrop-filter: blur(3px);
+          -webkit-backdrop-filter: blur(3px);
+        }
+
+        .brush-path { stroke: var(--paper); stroke-width: 3; fill: none; }
+        .brush-underline {
+          position: absolute; left: -2%; bottom: -0.18em; width: 104%; height: 0.3em; overflow: visible;
+        }
+        .brush-underline .brush-path { stroke-dasharray: 400; stroke-dashoffset: 400; transition: stroke-dashoffset 0.9s cubic-bezier(.2,.7,.2,1); }
+        .in-view .brush-underline .brush-path { stroke-dashoffset: 0; }
+
+        .reveal { opacity: 0; transform: translateY(18px); transition: opacity 0.7s ease, transform 0.7s ease; }
+        .reveal.in-view { opacity: 1; transform: translateY(0); }
+
+        .nav {
+          position: fixed; top: 0; left: 0; right: 0; z-index: 40;
+          display: flex; justify-content: space-between; align-items: center;
+          padding: 22px clamp(20px, 5vw, 56px);
+          font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase;
+        }
+        .nav-mark { font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 20px; letter-spacing: 0.02em; }
+        .nav-links { display: flex; gap: 28px; }
+        .nav-link { position: relative; opacity: 0.72; padding-bottom: 4px; transition: opacity 0.2s ease, color 0.2s ease; }
+        .nav-link:hover { opacity: 1; }
+        .nav-link .brush-underline { opacity: 0; transition: opacity 0.25s ease; }
+        .nav-link .brush-underline .brush-path { stroke-dashoffset: 400; }
+        .nav-link:hover .brush-underline { opacity: 1; }
+        .nav-link:hover .brush-underline .brush-path { stroke-dashoffset: 0; }
+        .nav-link.active { opacity: 1; color: var(--rust); }
+        .nav-link.active .brush-underline { opacity: 1; }
+        .nav-link.active .brush-underline .brush-path { stroke: var(--rust); stroke-dashoffset: 0; }
+        .nav-toggle { display: none; background: none; border: none; color: var(--paper); font-family: inherit; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; }
+        @media (max-width: 720px) {
+          .nav-links { display: none; }
+          .nav-toggle { display: block; }
+          .nav-links.open { display: flex; position: fixed; top: 60px; right: 20px; background: var(--charcoal); border: 1px solid #2a2924; padding: 16px 22px; flex-direction: column; gap: 14px; }
+        }
+
+        .hero { position: relative; min-height: 100svh; display: flex; flex-direction: column; justify-content: center; padding: 0 clamp(20px, 6vw, 64px); }
+        .eyebrow { font-size: 13px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--ash); margin-bottom: 18px; }
+        .eyebrow::before { content: "— "; color: var(--rust); }
+        .hero-name { font-size: clamp(58px, 13vw, 172px); margin: 0; overflow: hidden; }
+        .hero-letter {
+          display: inline-block; opacity: 0; transform: translateY(100%) rotateX(-40deg);
+          transition: opacity 0.6s ease, transform 0.6s cubic-bezier(0.16,1,0.3,1);
+        }
+        .hero-letter-in { opacity: 1; transform: translateY(0) rotateX(0deg); }
+        .hero-role { margin-top: 26px; max-width: 620px; font-size: clamp(15px, 2vw, 18px); line-height: 1.7; padding: 18px 22px; }
+        .hero-role .ash { color: var(--ash); }
+        .scroll-cue { position: absolute; bottom: 34px; left: clamp(20px, 6vw, 64px); font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ash); display: flex; align-items: center; gap: 10px; }
+        .scroll-cue .line { width: 34px; height: 1px; background: var(--ash); position: relative; overflow: hidden; }
+        .scroll-cue .line::after { content: ""; position: absolute; inset: 0; background: var(--paper); animation: slide 1.8s ease-in-out infinite; }
+        @keyframes slide { 0% { transform: translateX(-100%); } 50% { transform: translateX(0); } 100% { transform: translateX(100%); } }
+
+        section {
+          position: relative; padding: 120px clamp(20px, 6vw, 64px);
+          background: linear-gradient(180deg, transparent 0%, rgba(11,11,10,0.6) 15%, rgba(11,11,10,0.75) 50%, rgba(11,11,10,0.6) 85%, transparent 100%);
+        }
+
+        /* Section Divider */
+        .section-divider { padding: 0 clamp(20px, 6vw, 64px); overflow: hidden; }
+        .section-divider svg { width: 100%; height: 4px; }
+        .divider-line { stroke: var(--rust); stroke-width: 1; opacity: 0.5; stroke-dasharray: 800; stroke-dashoffset: 800; transition: stroke-dashoffset 1.5s cubic-bezier(0.16,1,0.3,1); }
+        .divider-line.drawn { stroke-dashoffset: 0; }
+        .section-head { display: flex; align-items: baseline; gap: 18px; margin-bottom: 54px; }
+        .section-num { color: var(--rust); font-size: 13px; letter-spacing: 0.1em; }
+        .section-title { font-size: clamp(34px, 5vw, 56px); margin: 0; }
+
+        .about-grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 24px; }
+        @media (max-width: 800px) { .about-grid { grid-template-columns: 1fr; } }
+        .about-copy { padding: 26px 28px; }
+        .about-copy p { font-size: clamp(16px, 2vw, 20px); line-height: 1.85; margin: 0 0 22px; }
+        .about-copy p:last-child { margin-bottom: 0; }
+        .about-copy .ash { color: var(--ash); }
+        .skills-strip { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+        .skill-chip {
+          font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--paper);
+          border: 1px solid #35332c; padding: 6px 12px; border-radius: 100px;
+          opacity: 0; transform: translateY(12px) scale(0.85);
+          transition: opacity 0.4s ease, transform 0.5s cubic-bezier(0.34,1.56,0.64,1), border-color 0.3s ease, background 0.3s ease;
+        }
+        .in-view .skill-chip { opacity: 1; transform: translateY(0) scale(1); }
+        .in-view .skill-chip:nth-child(1) { transition-delay: 0.1s; }
+        .in-view .skill-chip:nth-child(2) { transition-delay: 0.2s; }
+        .in-view .skill-chip:nth-child(3) { transition-delay: 0.3s; }
+        .in-view .skill-chip:nth-child(4) { transition-delay: 0.4s; }
+        .in-view .skill-chip:nth-child(5) { transition-delay: 0.5s; }
+        .skill-chip:hover { border-color: var(--rust); background: rgba(122,43,34,0.15); }
+        .strip-label { color: var(--rust); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; margin: 20px 0 10px; }
+        .open-to { display: inline-block; color: var(--rust); font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 26px; }
+        .fact-list { list-style: none; margin: 0; padding: 22px 26px; border-top: 1px solid #2a2924; }
+        .fact-list li { display: flex; justify-content: space-between; gap: 12px; padding: 14px 0; border-bottom: 1px solid #2a2924; font-size: 14px; }
+        .fact-list li:last-child { border-bottom: none; padding-bottom: 0; }
+        .fact-list .k { color: var(--ash); letter-spacing: 0.05em; text-transform: uppercase; font-size: 12px; }
+        .fact-list .v { text-align: right; }
+
+        .project { padding: 30px 28px; margin-bottom: 22px; transition: transform 0.2s ease, box-shadow 0.3s ease; }
+        .project:hover { box-shadow: 0 0 40px rgba(122,43,34,0.08); }
+        .project-top { display: flex; justify-content: space-between; align-items: baseline; gap: 24px; flex-wrap: wrap; }
+        .project-title { font-family: 'Big Shoulders Display', sans-serif; font-weight: 700; text-transform: uppercase; font-size: clamp(26px, 4vw, 42px); margin: 0; }
+        .project-tagline { color: var(--rust); font-size: 13px; letter-spacing: 0.05em; white-space: nowrap; }
+        .project-body { max-width: 640px; color: var(--ash); line-height: 1.8; margin: 14px 0 16px; font-size: 14.5px; }
+        .tag-row { display: flex; flex-wrap: wrap; gap: 10px; }
+        .tag {
+          font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase;
+          border: 1px solid #35332c; padding: 6px 12px; border-radius: 100px;
+          transition: border-color 0.3s ease, color 0.3s ease, background 0.3s ease;
+        }
+        .tag:hover { border-color: var(--rust); color: var(--rust); background: rgba(122,43,34,0.1); }
+
+        .now-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+        @media (max-width: 900px) { .now-grid { grid-template-columns: 1fr; } }
+        .now-card {
+          padding: 30px 26px; min-height: 190px; display: flex; flex-direction: column;
+          justify-content: space-between; border: 1px solid #262520;
+          transition: border-color 0.4s ease, box-shadow 0.4s ease, transform 0.3s ease;
+        }
+        .now-card:hover { border-color: var(--rust); box-shadow: 0 0 30px rgba(122,43,34,0.12); transform: translateY(-4px); }
+        .now-card-media { padding: 0; overflow: hidden; }
+        .now-card-media > div { padding: 22px 24px 26px; }
+        .now-render { width: 100%; height: 150px; object-fit: cover; display: block; filter: saturate(0.9) contrast(1.05); }
+        .now-card h3 { font-family: 'Big Shoulders Display', sans-serif; text-transform: uppercase; font-size: 24px; margin: 0 0 12px; }
+        .now-card p { color: var(--ash); font-size: 14px; line-height: 1.7; margin: 0; }
+        .now-tag { color: var(--rust); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 14px; }
+
+        .contact { padding-bottom: 160px; }
+        .contact-title {
+          font-size: clamp(40px, 8vw, 96px); margin: 0 0 36px;
+          animation: breathe 4s ease-in-out infinite;
+        }
+        @keyframes breathe {
+          0%, 100% { text-shadow: 0 0 0px transparent; }
+          50% { text-shadow: 0 0 30px rgba(122,43,34,0.35), 0 0 60px rgba(122,43,34,0.15); }
+        }
+        .contact-links { display: flex; flex-wrap: wrap; gap: 16px 40px; padding: 22px 26px; }
+        .contact-links a {
+          position: relative; font-size: 15px; letter-spacing: 0.05em; text-transform: uppercase;
+          padding-bottom: 4px; transition: color 0.3s ease, transform 0.2s ease; display: inline-block;
+        }
+        .contact-links a:hover { color: var(--rust); }
+        .contact-links a .brush-underline { opacity: 0; transition: opacity 0.25s ease; }
+        .contact-links a:hover .brush-underline { opacity: 1; }
+        .contact-links a:hover .brush-underline .brush-path { stroke-dashoffset: 0; }
+        .fine-print { margin-top: 60px; color: var(--ash); font-size: 12px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; border-top: 1px solid #2a2924; padding-top: 22px; }
+
+        @media (prefers-reduced-motion: reduce) {
+          .reveal, .brush-underline .brush-path { transition: none !important; }
+        }
+      `}</style>
+
+      <BootLoader />
+      <CursorGlow />
+
+      {webglOK ? (
+        <ThreeBackground
+          scrollRef={scrollRef}
+          reducedMotion={reducedMotion}
+          onUnavailable={() => setWebglOK(false)}
+        />
+      ) : (
+        <>
+          <div className="three-fallback" />
+          <div className="webgl-note">
+            WebGL isn't available here (blocked or disabled), so this is showing a
+            flat backdrop instead of the 3D scene.
+          </div>
+        </>
+      )}
+
+      <div className="content">
+        <nav className="nav">
+          <span className="nav-mark">SHADIQ /</span>
+          <button className="nav-toggle" onClick={() => setNavOpen((v) => !v)}>
+            {navOpen ? "Close" : "Menu"}
+          </button>
+          <div className={`nav-links ${navOpen ? "open" : ""}`}>
+            {NAV_LINKS.map((l) => (
+              <MagneticLink
+                key={l.id}
+                href={`#${l.id}`}
+                className={`nav-link ${activeSection === l.id ? "active" : ""}`}
+                onClick={(e) => {
+                  e.preventDefault();
+                  setNavOpen(false);
+                  scrollToSection(l.id);
+                }}
+              >
+                {l.label}
+                <BrushUnderline />
+              </MagneticLink>
+            ))}
+          </div>
+        </nav>
+
+        <header className="hero">
+          <div className="eyebrow">Database Administrator &amp; Tech Enthusiast — Kathmandu, Nepal</div>
+          <HeroTitle text="Shadiq" />
+          <p className="hero-role panel">
+            I work on the data and trust layers of AI systems — retrieval
+            pipelines, database tooling, and the unglamorous infrastructure
+            that keeps the rest of it honest.{" "}
+            <span className="ash">
+              A database administrator by background, still thinking like
+              one no matter what I'm building.
+            </span>
+          </p>
+          <div className="scroll-cue">
+            <span className="line" />
+            Scroll
+          </div>
+        </header>
+
+        <section id="work">
+          <Reveal className="section-head panel" style={{ display: "inline-flex" }}>
+            <span className="section-num">Work</span>
+            <ScrambleText className="section-title display" text="Selected Projects" />
+          </Reveal>
+          <div>
+            {PROJECTS.map((p, i) => (
+              <Reveal as="article" className="project-wrapper" delay={i * 60} key={p.title}>
+                <TiltCard className="project panel">
+                  <div className="project-top">
+                    <h3 className="project-title display">{p.title}</h3>
+                    <span className="project-tagline">{p.tagline}</span>
+                  </div>
+                  <p className="project-body">{p.body}</p>
+                  <div className="tag-row">
+                    {p.tags.map((t) => (
+                      <span className="tag" key={t}>
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                </TiltCard>
+              </Reveal>
+            ))}
+          </div>
+        </section>
+
+        <SectionDivider />
+
+        <section id="about">
+          <Reveal className="section-head">
+            <span className="section-num">About</span>
+            <ScrambleText className="section-title display" text="Who's Behind This" />
+          </Reveal>
+          <div className="about-grid">
+            <Reveal className="about-copy panel">
+              <p>
+                I'm Shadiq — a database administrator and tech enthusiast
+                working on the data and trust layers of AI systems: retrieval
+                pipelines, schema design, and the infrastructure underneath
+                them. Being a DBA at heart means I still can't look at a
+                system without wondering how it fails.
+              </p>
+              <p className="ash">
+                Right now I'm also finishing a BCA, and picking up work as a DB intern at
+                EDN along the way.
+              </p>
+              <p>
+                Most of what's here — the Django/DRF backends, a 449-file
+                Flutter app, raw SQL, React frontends — I built by writing
+                the spec and constraints and directing an AI agent through
+                it commit by commit, not by hand-typing every line. The
+                pattern holds across a dozen real repos, including one with
+                237 commits of sustained AI co-authorship.
+              </p>
+              <div className="skills-strip">
+                {["PostgreSQL", "FastAPI", "pgvector", "Ollama / Llama", "Flutter"].map(
+                  (s) => (
+                    <span className="skill-chip" key={s}>
+                      {s}
+                    </span>
+                  )
+                )}
+              </div>
+              <div className="strip-label">Languages, directed</div>
+              <div className="skills-strip">
+                {["Python", "JavaScript / TypeScript", "Dart", "SQL", "Bash"].map((s) => (
+                  <span className="skill-chip" key={s}>
+                    {s}
+                  </span>
+                ))}
+              </div>
+            </Reveal>
+            <Reveal delay={100} className="panel">
+              <ul className="fact-list">
+                <li><span className="k">Role</span><span className="v">Database Administrator</span></li>
+                <li><span className="k">Focus</span><span className="v">Data &amp; trust layers</span></li>
+                <li><span className="k">Studying</span><span className="v">BCA</span></li>
+                <li><span className="k">Background</span><span className="v">Database Administration</span></li>
+                <li><span className="k">Based in</span><span className="v">Kathmandu, Nepal</span></li>
+              </ul>
+            </Reveal>
+          </div>
+        </section>
+
+        <SectionDivider />
+
+        <section id="now">
+          <Reveal className="section-head">
+            <span className="section-num">Now</span>
+            <ScrambleText className="section-title display" text="Off the Clock" />
+          </Reveal>
+          <div className="now-grid">
+            <Reveal className="now-card now-card-media panel">
+              <img
+                className="now-render"
+                src={katawareImg}
+                alt="Rendered still of a procedural Blender recreation of the twilight kataware-doki scene from Kimi no Na wa"
+                loading="lazy"
+              />
+              <div>
+                <div className="now-tag">Blender</div>
+                <h3>Kataware-Doki Scene</h3>
+                <p>A procedural Blender recreation of the twilight "kataware-doki" location from <em>Kimi no Na wa</em>, built through direct scene work rather than off-the-shelf assets.</p>
+              </div>
+            </Reveal>
+            <Reveal className="now-card panel" delay={80}>
+              <div>
+                <div className="now-tag">AI Generation</div>
+                <h3>Pipelines &amp; Content</h3>
+                <p>An ongoing interest in AI-generated content and video — ComfyUI, Wan2GP — and building automated pipelines around them outside of work hours.</p>
+              </div>
+            </Reveal>
+            <Reveal className="now-card panel" delay={160}>
+              <div>
+                <div className="now-tag">Side Quests</div>
+                <h3>Random Projects</h3>
+                <p>A long tail of smaller builds and experiments — from a YouTube automation pipeline to odd one-off tools — some finished, some just proof a random idea worked.</p>
+              </div>
+            </Reveal>
+          </div>
+        </section>
+
+        <SectionDivider />
+
+        <section id="contact" className="contact">
+          <Reveal>
+            <div className="section-head" style={{ marginBottom: 26 }}>
+              <span className="section-num">Contact</span>
+            </div>
+            <ScrambleText className="contact-title display" text="Let's talk shop." />
+          </Reveal>
+          <Reveal delay={80} className="open-to">
+            Open to full-time roles and freelance projects.
+          </Reveal>
+          <Reveal delay={100} className="panel">
+            <div className="contact-links">
+              <a href="mailto:shadiqpoke@gmail.com">Email<BrushUnderline /></a>
+              <a href="https://github.com/shadiqash" target="_blank" rel="noreferrer">GitHub<BrushUnderline /></a>
+              <a href="https://www.linkedin.com/in/shadiq-shah-3944422b1/" target="_blank" rel="noreferrer">LinkedIn<BrushUnderline /></a>
+              <a href="/resume.pdf" target="_blank" rel="noreferrer">Résumé<BrushUnderline /></a>
+            </div>
+          </Reveal>
+          <div className="fine-print">
+            <span>Shadiq — Kathmandu, Nepal</span>
+            <span>Built with brush, type &amp; WebGL</span>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
