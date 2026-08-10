@@ -436,48 +436,405 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     // ink-brush theme gives way to an actual colorful solar system, the
     // payoff for diving in rather than just orbiting it. A portal ring
     // brings you back the same way, restoring everything exactly as it was.
-    const BLACKHOLE_TRIGGER_RADIUS = 1.7;
-    const DIVE_RATE = 0.6; // progress/sec once inside the trigger radius
+    const BLACKHOLE_TRIGGER_RADIUS = 2.2;
+    const DIVE_RATE = 1.1; // progress/sec once inside the trigger radius
+    const CAPTURE_RADIUS = 5.5; // where the core's pull starts to be felt
+    const CAPTURE_ACCEL = 9; // below SHIP_ACCEL, so full thrust always escapes
     const SOLAR_SYSTEM_ARRIVAL = new THREE.Vector3(0, 2, 15);
     const PORTAL_POSITION = new THREE.Vector3(3, 2, 15);
     const PORTAL_RADIUS = 1.3;
     let inSolarSystem = false;
     let diveProgress = 0;
     let flashOpacity = 0;
+    let captured = false; // past the horizon — thrust no longer saves you
+
+    /* Value noise + fBm, used to paint every planet's surface procedurally.
+       Textures are generated rather than fetched so the whole thing stays a
+       single self-contained bundle with no image requests. */
+    function hash2(x, y) {
+      const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+      return n - Math.floor(n);
+    }
+    function valueNoise(x, y) {
+      const xi = Math.floor(x);
+      const yi = Math.floor(y);
+      const xf = x - xi;
+      const yf = y - yi;
+      const u = xf * xf * (3 - 2 * xf);
+      const v = yf * yf * (3 - 2 * yf);
+      const a = hash2(xi, yi);
+      const b = hash2(xi + 1, yi);
+      const c = hash2(xi, yi + 1);
+      const d = hash2(xi + 1, yi + 1);
+      return a * (1 - u) * (1 - v) + b * u * (1 - v) + c * (1 - u) * v + d * u * v;
+    }
+    function fbm(x, y, octaves) {
+      let sum = 0;
+      let amp = 0.5;
+      let freq = 1;
+      for (let o = 0; o < octaves; o++) {
+        sum += valueNoise(x * freq, y * freq) * amp;
+        freq *= 2;
+        amp *= 0.5;
+      }
+      return sum;
+    }
+    function mixHex(a, b, t) {
+      const ar = (a >> 16) & 255;
+      const ag = (a >> 8) & 255;
+      const ab = a & 255;
+      const br = (b >> 16) & 255;
+      const bg = (b >> 8) & 255;
+      const bb = b & 255;
+      return `rgb(${Math.round(ar + (br - ar) * t)},${Math.round(ag + (bg - ag) * t)},${Math.round(ab + (bb - ab) * t)})`;
+    }
+
+    /* Equirectangular surface map. `bands` gives gas giants their latitudinal
+       jet streams (noise stretched hard in x); low `bands` gives rocky worlds
+       blotchy continents. Wrapping in x is handled by sampling noise on a
+       cylinder so the seam behind the planet doesn't show. */
+    function makePlanetTexture(def) {
+      const w = 256;
+      const h = 128;
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(w, h);
+      const ramp = def.ramp;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const lon = (x / w) * Math.PI * 2;
+          // Sample on a cylinder so x wraps seamlessly around the sphere.
+          const nx = Math.cos(lon) * 2.2;
+          const nz = Math.sin(lon) * 2.2;
+          const ny = (y / h) * def.bands;
+          let n = fbm(nx + nz * 0.5, ny, 5);
+          if (def.bands > 4) n = n * 0.55 + Math.sin(ny * 2.5 + n * 3) * 0.22 + 0.28;
+          n = Math.max(0, Math.min(1, n));
+          // Poles run colder/brighter on every body — a cheap but convincing cue.
+          const lat = Math.abs(y / h - 0.5) * 2;
+          const polar = Math.max(0, lat - (def.iceCap ?? 0.78)) / 0.22;
+          const t = Math.max(0, Math.min(1, n));
+          const stops = ramp.length - 1;
+          const seg = Math.min(stops - 1, Math.floor(t * stops));
+          const local = t * stops - seg;
+          const rgb = mixHex(ramp[seg], ramp[seg + 1], local);
+          const m = /rgb\((\d+),(\d+),(\d+)\)/.exec(rgb);
+          let r = +m[1];
+          let g = +m[2];
+          let b = +m[3];
+          if (polar > 0) {
+            const p = Math.min(1, polar);
+            r += (238 - r) * p;
+            g += (245 - g) * p;
+            b += (255 - b) * p;
+          }
+          const i = (y * w + x) * 4;
+          img.data[i] = r;
+          img.data[i + 1] = g;
+          img.data[i + 2] = b;
+          img.data[i + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    /* Saturn-style rings: concentric bands of varying brightness with real
+       gaps punched through the alpha channel, drawn into a 1px-tall strip
+       that the ring geometry samples radially. */
+    function makeRingTexture(color) {
+      const w = 256;
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = 1;
+      const ctx = canvas.getContext("2d");
+      const img = ctx.createImageData(w, 1);
+      const r = (color >> 16) & 255;
+      const g = (color >> 8) & 255;
+      const b = color & 255;
+      for (let x = 0; x < w; x++) {
+        const t = x / w;
+        let a = 0.55 + Math.sin(t * 42) * 0.2 + fbm(t * 18, 0, 3) * 0.35;
+        // Cassini-like divisions.
+        if (t < 0.12 || t > 0.97) a = 0;
+        if (t > 0.55 && t < 0.61) a *= 0.15;
+        if (t > 0.78 && t < 0.81) a *= 0.3;
+        const shade = 0.7 + fbm(t * 30, 5, 3) * 0.5;
+        const i = x * 4;
+        img.data[i] = Math.min(255, r * shade);
+        img.data[i + 1] = Math.min(255, g * shade);
+        img.data[i + 2] = Math.min(255, b * shade);
+        img.data[i + 3] = Math.max(0, Math.min(1, a)) * 255;
+      }
+      ctx.putImageData(img, 0, 0);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    // Radial falloff sprite, reused for the sun's corona and the nebulae.
+    function makeGlowTexture(inner, outer) {
+      const s = 128;
+      const canvas = document.createElement("canvas");
+      canvas.width = s;
+      canvas.height = s;
+      const ctx = canvas.getContext("2d");
+      const grad = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+      grad.addColorStop(0, inner);
+      grad.addColorStop(0.35, outer);
+      grad.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, s, s);
+      const tex = new THREE.CanvasTexture(canvas);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    /* The sun is the only light source in here, so planets get a real lit
+       limb and a dark night side — the single biggest realism win over the
+       previous flat MeshBasicMaterial spheres. True inverse-square falloff
+       (decay 2) blows out the inner worlds while leaving the outer ones
+       black, so this uses a gentler decay: still an obvious "closer is
+       brighter" cue, but every planet stays readable. */
+    const sunLight = new THREE.PointLight(0xfff0d0, 26, 0, 1);
+    sunLight.visible = false;
+    scene.add(sunLight);
+    // Faint fill so night sides read as dark blue rather than pure black.
+    const starFill = new THREE.AmbientLight(0x2b3a58, 0.9);
+    starFill.visible = false;
+    scene.add(starFill);
 
     const sun = new THREE.Group();
     sun.visible = false;
-    sun.add(new THREE.Mesh(new THREE.IcosahedronGeometry(1.1, 2), new THREE.MeshBasicMaterial({ color: 0xfff2c8 })));
-    sun.add(
-      new THREE.Mesh(
-        new THREE.IcosahedronGeometry(1.7, 1),
-        new THREE.MeshBasicMaterial({ color: 0xffcf6b, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false })
-      )
+    sun.add(new THREE.Mesh(new THREE.SphereGeometry(1.1, 48, 32), new THREE.MeshBasicMaterial({ color: 0xfff6e2 })));
+    // Two glow shells: a tight photosphere bloom over a broad, faint corona,
+    // which reads far more like a star than one big soft disc.
+    const coronaInner = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: makeGlowTexture("rgba(255,252,240,0.9)", "rgba(255,196,110,0.5)"),
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        transparent: true,
+        fog: false,
+      })
     );
+    coronaInner.scale.setScalar(3.6);
+    sun.add(coronaInner);
+    const coronaOuter = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: makeGlowTexture("rgba(255,214,150,0.35)", "rgba(255,140,50,0.14)"),
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        transparent: true,
+        opacity: 0.7,
+        fog: false,
+      })
+    );
+    coronaOuter.scale.setScalar(8.5);
+    sun.add(coronaOuter);
     scene.add(sun);
 
     const PLANET_DEFS = [
-      { color: 0x4fa3ff, radius: 0.5, orbitRadius: 4.5, speed: 0.35, tilt: 0.5 },
-      { color: 0xff6b4a, radius: 0.35, orbitRadius: 6.5, speed: 0.26, tilt: -0.7 },
-      { color: 0x3ad9c4, radius: 0.65, orbitRadius: 8.5, speed: 0.19, tilt: 0.3, ring: true },
-      { color: 0xb388ff, radius: 0.42, orbitRadius: 10.5, speed: 0.14, tilt: -0.4 },
-      { color: 0xffd24a, radius: 0.3, orbitRadius: 12.5, speed: 0.11, tilt: 0.6 },
+      // Scorched inner rock.
+      { radius: 0.42, orbitRadius: 4.5, speed: 0.35, tilt: 0.35, axial: 0.04, bands: 2.5,
+        ramp: [0x2b1a12, 0x6b3a22, 0xb06a38, 0xe0a05c], iceCap: 1.1 },
+      // Rusty desert world.
+      { radius: 0.34, orbitRadius: 6.4, speed: 0.26, tilt: -0.55, axial: 0.42, bands: 3,
+        ramp: [0x4a1f14, 0x8c3d22, 0xc2683a, 0xe6a173], iceCap: 0.86 },
+      // Earthlike: oceans, coasts, landmass, cloud deck on a separate shell.
+      { radius: 0.52, orbitRadius: 8.6, speed: 0.19, tilt: 0.25, axial: 0.41, bands: 2,
+        ramp: [0x0a2c52, 0x11467a, 0xc2ab72, 0x2f6b34, 0x8fa36a], iceCap: 0.8, clouds: true },
+      // Banded gas giant with a ring system.
+      { radius: 0.95, orbitRadius: 11.5, speed: 0.13, tilt: -0.3, axial: 0.47, bands: 9,
+        ramp: [0x6b4a2a, 0xa8783f, 0xd9b071, 0xf0dcb0], iceCap: 1.1, ring: 0xd8c39a },
+      // Cold ice giant on the outer edge.
+      { radius: 0.6, orbitRadius: 14.5, speed: 0.09, tilt: 0.5, axial: 1.7, bands: 6,
+        ramp: [0x123c5e, 0x1e6c96, 0x4aa3c4, 0x9fd6e6], iceCap: 0.9 },
     ];
     const planets = PLANET_DEFS.map((def) => {
-      const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(def.radius, 2), new THREE.MeshBasicMaterial({ color: def.color }));
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(def.radius, 40, 28),
+        new THREE.MeshStandardMaterial({ roughness: 0.92, metalness: 0.02 })
+      );
       mesh.visible = false;
+      mesh.rotation.z = def.axial;
+
       let ring = null;
       if (def.ring) {
+        // A flat annulus (not a torus) is what actually reads as a ring plane,
+        // and its UVs let the banded texture run radially.
+        const ringGeo = new THREE.RingGeometry(def.radius * 1.5, def.radius * 2.6, 96, 1);
+        const pos = ringGeo.attributes.position;
+        const uv = ringGeo.attributes.uv;
+        const v = new THREE.Vector3();
+        const inner = def.radius * 1.5;
+        const outer = def.radius * 2.6;
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i);
+          uv.setXY(i, (v.length() - inner) / (outer - inner), 0.5);
+        }
         ring = new THREE.Mesh(
-          new THREE.TorusGeometry(def.radius * 1.8, def.radius * 0.18, 8, 32),
-          new THREE.MeshBasicMaterial({ color: def.color, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
+          ringGeo,
+          new THREE.MeshBasicMaterial({ transparent: true, side: THREE.DoubleSide, depthWrite: false })
         );
-        ring.rotation.x = Math.PI / 2.4;
+        ring.rotation.x = Math.PI / 2;
         mesh.add(ring);
       }
+
+      let clouds = null;
+      if (def.clouds) {
+        clouds = new THREE.Mesh(
+          new THREE.SphereGeometry(def.radius * 1.02, 32, 20),
+          new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.42, roughness: 1, depthWrite: false })
+        );
+        mesh.add(clouds);
+      }
+
       scene.add(mesh);
-      return { ...def, mesh, ring, angle: Math.random() * Math.PI * 2 };
+      return { ...def, mesh, ring, ringColor: def.ring ?? null, clouds, angle: Math.random() * Math.PI * 2, spin: 0.25 + Math.random() * 0.4 };
     });
+
+    /* Distant stars. They're parented to nothing and re-centred on the camera
+       every frame, so they never parallax and never leave the 100-unit far
+       plane — which is exactly how genuinely distant stars behave. Per-vertex
+       size and colour temperature come through a tiny shader so the field has
+       real magnitude variation instead of uniform dots. */
+    const STAR_COUNT = isSmallScreen ? 2600 : 5200;
+    const starPos = new Float32Array(STAR_COUNT * 3);
+    const starColor = new Float32Array(STAR_COUNT * 3);
+    const starSize = new Float32Array(STAR_COUNT);
+    const STAR_TEMPS = [
+      [0.62, 0.72, 1.0], // hot blue
+      [0.78, 0.85, 1.0],
+      [1.0, 1.0, 1.0],
+      [1.0, 0.96, 0.86],
+      [1.0, 0.84, 0.62], // cool orange
+      [1.0, 0.7, 0.52],
+    ];
+    for (let i = 0; i < STAR_COUNT; i++) {
+      // Half uniform over the sphere, half concentrated into a galactic band.
+      const inBand = i % 2 === 0;
+      const theta = Math.random() * Math.PI * 2;
+      const u = inBand
+        ? Math.max(-1, Math.min(1, (Math.random() + Math.random() + Math.random() - 1.5) * 0.42))
+        : Math.random() * 2 - 1;
+      const r = Math.sqrt(1 - u * u);
+      const dir = new THREE.Vector3(r * Math.cos(theta), u, r * Math.sin(theta));
+      if (inBand) dir.applyAxisAngle(new THREE.Vector3(0.42, 0, 0.9).normalize(), 0.5);
+      dir.multiplyScalar(70);
+      starPos[i * 3] = dir.x;
+      starPos[i * 3 + 1] = dir.y;
+      starPos[i * 3 + 2] = dir.z;
+      const temp = STAR_TEMPS[(Math.random() * STAR_TEMPS.length) | 0];
+      // Magnitude distribution: mostly faint pinpricks, a few standouts.
+      const mag = Math.pow(Math.random(), 2.6);
+      const b = 0.55 + mag * 0.45;
+      // The eye only resolves colour in the brightest stars, and the post
+      // pass's chromatic aberration turns saturated 2px dots into coloured
+      // confetti — so faint stars are pulled back toward white.
+      const sat = 0.25 + mag * 0.75;
+      starColor[i * 3] = (1 + (temp[0] - 1) * sat) * b;
+      starColor[i * 3 + 1] = (1 + (temp[1] - 1) * sat) * b;
+      starColor[i * 3 + 2] = (1 + (temp[2] - 1) * sat) * b;
+      starSize[i] = 1.8 + mag * 3.4;
+    }
+    const starGeo = new THREE.BufferGeometry();
+    starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
+    starGeo.setAttribute("color", new THREE.BufferAttribute(starColor, 3));
+    starGeo.setAttribute("aSize", new THREE.BufferAttribute(starSize, 1));
+    const starMaterial = new THREE.ShaderMaterial({
+      uniforms: { uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2) }, uTwinkle: { value: 0 } },
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+      vertexShader: `
+        attribute float aSize;
+        varying vec3 vColor;
+        varying float vMag;
+        uniform float uPixelRatio;
+        uniform float uTwinkle;
+        void main() {
+          vColor = color;
+          vMag = aSize;
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          float flicker = 0.85 + 0.15 * sin(uTwinkle * 2.0 + position.x * 12.0 + position.y * 7.0);
+          gl_PointSize = aSize * uPixelRatio * flicker;
+          gl_Position = projectionMatrix * mv;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vColor;
+        varying float vMag;
+        void main() {
+          vec2 d = gl_PointCoord - vec2(0.5);
+          float r = length(d);
+          if (r > 0.5) discard;
+          // Soft airy-disc core plus a faint halo on the brighter stars.
+          float core = smoothstep(0.5, 0.0, r);
+          float halo = smoothstep(0.5, 0.15, r) * 0.35 * smoothstep(2.0, 4.4, vMag);
+          gl_FragColor = vec4(vColor, core * core + halo);
+        }
+      `,
+    });
+    starMaterial.vertexColors = true;
+    const starfield = new THREE.Points(starGeo, starMaterial);
+    starfield.visible = false;
+    starfield.frustumCulled = false;
+    scene.add(starfield);
+
+    // A couple of huge, very dim nebula clouds for depth behind the stars.
+    const nebulaTex = makeGlowTexture("rgba(120,90,200,0.5)", "rgba(60,40,120,0.22)");
+    const nebulae = [
+      { color: 0x7a5cc4, pos: new THREE.Vector3(-46, 14, -44), scale: 62 },
+      { color: 0x2f6f8c, pos: new THREE.Vector3(52, -18, -30), scale: 50 },
+      { color: 0x8c3f5a, pos: new THREE.Vector3(10, 30, 55), scale: 44 },
+    ].map(({ color, pos, scale }) => {
+      const sprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: nebulaTex,
+          color,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          transparent: true,
+          opacity: 0.16,
+          fog: false,
+        })
+      );
+      sprite.position.copy(pos);
+      sprite.scale.setScalar(scale);
+      sprite.visible = false;
+      scene.add(sprite);
+      return sprite;
+    });
+
+    /* Surface textures cost a few hundred thousand noise samples to generate,
+       which is pure waste for the vast majority of visitors who never fly
+       into the core. Built once, lazily, on the first warp. */
+    let solarTexturesBuilt = false;
+    function buildSolarTextures() {
+      if (solarTexturesBuilt) return;
+      solarTexturesBuilt = true;
+      planets.forEach((p) => {
+        p.mesh.material.map = makePlanetTexture(p);
+        p.mesh.material.needsUpdate = true;
+        if (p.ring) {
+          p.ring.material.map = makeRingTexture(p.ringColor);
+          p.ring.material.needsUpdate = true;
+        }
+        if (p.clouds) {
+          const tex = makePlanetTexture({ bands: 3.5, ramp: [0x000000, 0x000000, 0xffffff, 0xffffff], iceCap: 1.1 });
+          p.clouds.material.alphaMap = tex;
+          p.clouds.material.transparent = true;
+          p.clouds.material.needsUpdate = true;
+        }
+      });
+    }
 
     const portal = new THREE.Mesh(
       new THREE.TorusGeometry(0.9, 0.09, 12, 32),
@@ -786,7 +1143,37 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         if (keys.ShiftLeft || keys.ShiftRight) thrust.sub(up);
         if (thrust.lengthSq() > 0) thrust.normalize().multiplyScalar(SHIP_ACCEL * dt);
 
-        ship.vel.add(thrust);
+        /* Gravity around the core, in two tiers.
+
+           Outside the horizon it's an ordinary escapable pull (CAPTURE_ACCEL
+           is below SHIP_ACCEL, so full thrust wins). That alone can't set up
+           the dive though: an unpowered flyby is a hyperbola, so whatever
+           speed gravity adds on the way in it takes straight back on the way
+           out, and the ship sails through the trigger sphere in a few tenths
+           of a second when the dive needs to be held for about a second.
+
+           So crossing the horizon commits you. Thrust is cut to a token
+           amount, the pull goes hard, and drag collapses your speed — the
+           ship falls to the middle and the dive completes. A one-way trip
+           past the horizon is what a black hole actually is, and it's the
+           only version of this that's reliably reachable by flying. */
+        const distToCore = ship.pos.length();
+        if (!inSolarSystem && distToCore < BLACKHOLE_TRIGGER_RADIUS) captured = true;
+
+        if (captured) {
+          ship.vel.addScaledVector(thrust, 0.12);
+          if (distToCore > 0.0001) {
+            ship.vel.addScaledVector(ship.pos, (-CAPTURE_ACCEL * 1.6 * dt) / distToCore);
+          }
+          ship.vel.multiplyScalar(Math.pow(0.02, dt));
+        } else {
+          ship.vel.add(thrust);
+          if (!inSolarSystem && distToCore < CAPTURE_RADIUS && distToCore > 0.0001) {
+            const pull = 1 - distToCore / CAPTURE_RADIUS;
+            ship.vel.addScaledVector(ship.pos, (-CAPTURE_ACCEL * pull * dt) / distToCore);
+          }
+        }
+
         ship.vel.multiplyScalar(Math.pow(SHIP_DRAG_PER_SEC, dt));
         if (ship.vel.length() > SHIP_MAX_SPEED) ship.vel.setLength(SHIP_MAX_SPEED);
         ship.pos.addScaledVector(ship.vel, dt);
@@ -802,45 +1189,72 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           if (diveProgress >= 1) {
             inSolarSystem = true;
             diveProgress = 0;
+            captured = false;
             flashOpacity = 1;
+            buildSolarTextures();
             blob.visible = false;
             strokes.forEach((s) => (s.visible = false));
             particles.visible = false;
+            // The cursor trail dots park at the origin, which is exactly
+            // where the sun sits — they'd read as a dark blot on its face.
+            trailDots.forEach((d) => (d.visible = false));
             beacons.forEach((b) => (b.group.visible = false));
             secretBeacon.visible = false;
             sun.visible = true;
+            sunLight.visible = true;
+            starFill.visible = true;
+            starfield.visible = true;
+            nebulae.forEach((n) => (n.visible = true));
             planets.forEach((p) => (p.mesh.visible = true));
             portal.visible = true;
             ship.pos.copy(SOLAR_SYSTEM_ARRIVAL);
             ship.vel.set(0, 0, 0);
             ship.yaw = 0;
             ship.pitch = -0.12;
-            scene.fog.color.setHex(0x160c26);
-            scene.fog.density = 0.035;
+            // Snap the lensing off rather than letting it ease out. It's
+            // centred on the origin, which is exactly where the sun now sits,
+            // so a slow decay spends several seconds smearing the star into
+            // an oval with a dark pinch through its middle.
+            postMaterial.uniforms.uLensStrength.value = 0;
+            // Space is very nearly a vacuum — almost no fog, so the distant
+            // starfield actually reads instead of being washed out.
+            scene.fog.color.setHex(0x05060d);
+            scene.fog.density = 0.006;
           }
         } else {
           planets.forEach((p) => {
             p.angle += dt * p.speed;
+            // Each orbit sits on its own slightly inclined plane, so the
+            // system looks like a real one rather than a flat dial.
             p.mesh.position.set(
               Math.cos(p.angle) * p.orbitRadius,
-              Math.sin(p.angle * 0.6) * p.tilt,
+              Math.sin(p.angle) * p.tilt,
               Math.sin(p.angle) * p.orbitRadius
             );
-            p.mesh.rotation.y += dt * 0.5;
-            if (p.ring) p.ring.rotation.z += dt * 0.15;
+            // Rings stay locked to the planet's equator; only the body spins.
+            p.mesh.rotation.y += dt * p.spin;
+            // Clouds drift slightly faster than the surface beneath them.
+            if (p.clouds) p.clouds.rotation.y += dt * 0.06;
           });
           sun.rotation.y += dt * 0.05;
           portal.rotation.y += dt * 0.9;
+          starMaterial.uniforms.uTwinkle.value = t;
 
           if (ship.pos.distanceTo(portal.position) < PORTAL_RADIUS) {
             inSolarSystem = false;
+            captured = false;
             flashOpacity = 1;
             sun.visible = false;
+            sunLight.visible = false;
+            starFill.visible = false;
+            starfield.visible = false;
+            nebulae.forEach((n) => (n.visible = false));
             planets.forEach((p) => (p.mesh.visible = false));
             portal.visible = false;
             blob.visible = true;
             strokes.forEach((s) => (s.visible = true));
             particles.visible = true;
+            trailDots.forEach((d) => (d.visible = true));
             ship.pos.set(0, 0, 6);
             ship.vel.set(0, 0, 0);
             ship.yaw = 0;
@@ -849,6 +1263,9 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
             scene.fog.density = 0.05;
           }
         }
+        // Genuinely distant stars show no parallax, so the field rides along
+        // with the camera and stays comfortably inside the far plane.
+        starfield.position.copy(camera.position);
         flashOpacity = damp(flashOpacity, 0, 3, dt);
         warpFlash.style.opacity = String(flashOpacity);
 
@@ -956,7 +1373,12 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         blob.visible = true;
         strokes.forEach((s) => (s.visible = true));
         particles.visible = true;
+        trailDots.forEach((d) => (d.visible = true));
         sun.visible = false;
+        sunLight.visible = false;
+        starFill.visible = false;
+        starfield.visible = false;
+        nebulae.forEach((n) => (n.visible = false));
         planets.forEach((p) => (p.mesh.visible = false));
         portal.visible = false;
         if (inSolarSystem) {
@@ -965,6 +1387,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           scene.fog.density = 0.05;
         }
         diveProgress = 0;
+        captured = false;
 
         if (Math.abs(camera.fov - 55) > 0.01) {
           camera.fov = damp(camera.fov, 55, 6, dt);
@@ -1056,17 +1479,31 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         secretBeacon.geometry.dispose();
         secretBeacon.material.dispose();
         sun.children.forEach((m) => {
-          m.geometry.dispose();
+          // Sprites share one static geometry — disposing it would break any
+          // other sprite in the scene, so only meshes get theirs disposed.
+          if (m.isMesh) m.geometry.dispose();
+          m.material.map?.dispose();
           m.material.dispose();
         });
         planets.forEach((p) => {
           p.mesh.geometry.dispose();
+          p.mesh.material.map?.dispose();
           p.mesh.material.dispose();
           if (p.ring) {
             p.ring.geometry.dispose();
+            p.ring.material.map?.dispose();
             p.ring.material.dispose();
           }
+          if (p.clouds) {
+            p.clouds.geometry.dispose();
+            p.clouds.material.alphaMap?.dispose();
+            p.clouds.material.dispose();
+          }
         });
+        starGeo.dispose();
+        starMaterial.dispose();
+        nebulae.forEach((n) => n.material.dispose());
+        nebulaTex.dispose();
         portal.geometry.dispose();
         portal.material.dispose();
         renderTarget.dispose();
