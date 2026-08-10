@@ -3,7 +3,6 @@ import katawareImg from "./assets/kataware.jpg";
 
 /* --- data & hooks --- */
 import { NAV_LINKS, PROJECTS } from "./data/projects";
-import useGoogleFonts from "./hooks/useGoogleFonts";
 import useGithubActivity from "./hooks/useGithubActivity";
 import useAmbientDrone from "./hooks/useAmbientDrone";
 
@@ -31,7 +30,6 @@ function scrollToSection(id) {
 }
 
 export default function Portfolio3D() {
-  useGoogleFonts();
   const [navOpen, setNavOpen] = useState(false);
   const scrollRef = useRef(0);
   const [reducedMotion, setReducedMotion] = useState(false);

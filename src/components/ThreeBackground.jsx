@@ -195,15 +195,20 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     // --- particle field: a real N-body gravity system, not a scripted
     // animation. Every particle is pulled toward the blob (the dominant
     // mass) and weakly toward every other particle via full O(n^2) pairwise
-    // gravity — no Barnes-Hut, no spatial partitioning, on purpose. 260
-    // particles is ~34k pairs/frame, which a modern JS engine chews through
-    // without a second thought.
+    // gravity — no Barnes-Hut, no spatial partitioning, on purpose. Fine at
+    // 260 particles (~34k pairs/frame) on a desktop CPU; scaled down on
+    // small/touch screens below, where that cost actually matters.
     const GRAV_BLOB = 5.5;
     const GRAV_MUTUAL = 0.15;
     const GRAV_POINTER = 3.5;
     const GRAV_SOFTEN = 1.1; // avoids the classic N-body singularity at r -> 0
 
-    const particleCount = 260;
+    // Mutual gravity is O(n^2) — fine at 260 particles on a desktop GPU/CPU,
+    // but that's ~34k pairs/frame, real cost on a phone's CPU and battery.
+    // Cut it down on small/coarse-pointer screens rather than eating that
+    // cost everywhere just because the desktop case is cheap to ignore.
+    const isSmallScreen = window.innerWidth < 720 || window.matchMedia("(pointer: coarse)").matches;
+    const particleCount = isSmallScreen ? 110 : 260;
     const positions = new Float32Array(particleCount * 3);
     const velocities = new Float32Array(particleCount * 3);
     for (let i = 0; i < particleCount; i++) {
