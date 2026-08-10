@@ -32,6 +32,12 @@ import katawareImg from "./assets/kataware.jpg";
    - Camera flies a designed bezier path (not a straight dolly)
      as you scroll, with a subtle roll.
    - Pointer position adds gentle parallax to the whole scene.
+   - Opt-in "pilot mode" (nav button / command palette / "PILOT")
+     swaps the scroll-driven camera for free-flight: WASD/arrows
+     + space/shift thrust, mouse position steers (offset from
+     center = turn), no pointer lock. Pauses page scroll while
+     active; Escape (or the same toggle) hands the scroll camera
+     back exactly where it left off.
 
    Content sits in normal document flow (real scroll, no
    scroll-jacking) on top of a fixed full-viewport canvas —
@@ -451,7 +457,7 @@ function BrushUnderline() {
 }
 
 /* ---------- Command Palette (psql-styled ⌘K) ---------- */
-function CommandPalette({ open, onClose, onNavigate, soundOn, onToggleSound, onShockwave }) {
+function CommandPalette({ open, onClose, onNavigate, soundOn, onToggleSound, onShockwave, pilotMode, onTogglePilot }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const inputRef = useRef(null);
@@ -490,6 +496,12 @@ function CommandPalette({ open, onClose, onNavigate, soundOn, onToggleSound, onS
       label: soundOn ? "Turn ambient sound off" : "Turn ambient sound on",
       hint: "toggle audio",
       action: onToggleSound,
+    },
+    {
+      id: "pilot",
+      label: pilotMode ? "Exit pilot mode" : "Enter pilot mode",
+      hint: pilotMode ? "esc" : "fly through the gravity sim",
+      action: onTogglePilot,
     },
     {
       id: "diagnostic",
@@ -588,7 +600,7 @@ function isWebGLAvailable() {
 }
 
 /* ---------------- Three.js background ---------------- */
-function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, triggerRef }) {
+function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, triggerRef, pilotMode }) {
   const mountRef = useRef(null);
   const shockwaveRef = useRef({ time: 100, x: 0, y: 0, active: false });
   const scrollVelocity = useRef(0);
@@ -597,6 +609,10 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
   useEffect(() => {
     activityRef.current = activity;
   }, [activity]);
+  const pilotModeRef = useRef(pilotMode);
+  useEffect(() => {
+    pilotModeRef.current = pilotMode;
+  }, [pilotMode]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -846,6 +862,33 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
     }
     window.addEventListener("click", onClick);
 
+    // --- pilot mode: free-flight through the gravity sim ---
+    // Mouse position doubles as the flight stick (offset from screen
+    // center = steer), WASD/arrows + space/shift are thrust. No pointer
+    // lock — keeps the existing cursor/UI plumbing untouched.
+    const SHIP_KEYS = new Set([
+      "KeyW", "KeyA", "KeyS", "KeyD",
+      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+      "Space", "ShiftLeft", "ShiftRight",
+    ]);
+    const keys = {};
+    function onKeyDown(e) {
+      if (pilotModeRef.current && SHIP_KEYS.has(e.code)) e.preventDefault();
+      keys[e.code] = true;
+    }
+    function onKeyUp(e) {
+      keys[e.code] = false;
+    }
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+
+    const SHIP_ACCEL = 14;
+    const SHIP_MAX_SPEED = 11;
+    const SHIP_DRAG = 0.985;
+    const ship = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), yaw: 0, pitch: 0 };
+    let wasPiloting = false;
+    camera.rotation.order = "YXZ";
+
     function onScroll() {
       const currentY = window.scrollY;
       scrollVelocity.current = currentY - lastScrollY.current;
@@ -1083,12 +1126,51 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
         particles.geometry.attributes.position.needsUpdate = true;
       }
 
-      world.rotation.y += (pointer.x * 0.15 - world.rotation.y) * 0.02;
-      world.rotation.x += (pointer.y * 0.1 - world.rotation.x) * 0.02;
+      const piloting = pilotModeRef.current;
 
-      const camPoint = cameraCurve.getPointAt(Math.min(Math.max(scroll, 0), 1));
-      camera.position.copy(camPoint);
-      camera.rotation.z = Math.sin(scroll * Math.PI) * 0.035 * motion;
+      if (piloting) {
+        if (!wasPiloting) {
+          // Just entered pilot mode — take off from wherever the scroll
+          // camera currently is, instead of snapping somewhere arbitrary.
+          ship.pos.copy(camera.position);
+          ship.vel.set(0, 0, 0);
+          ship.yaw = camera.rotation.y;
+          ship.pitch = camera.rotation.x;
+          camera.rotation.z = 0;
+        }
+
+        ship.yaw -= pointer.x * 0.045;
+        ship.pitch = THREE.MathUtils.clamp(ship.pitch + pointer.y * 0.03, -1.3, 1.3);
+
+        const forward = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(ship.pitch, ship.yaw, 0, "YXZ"));
+        const right = new THREE.Vector3(1, 0, 0).applyEuler(new THREE.Euler(0, ship.yaw, 0, "YXZ"));
+        const up = new THREE.Vector3(0, 1, 0);
+
+        const thrust = new THREE.Vector3();
+        if (keys.KeyW || keys.ArrowUp) thrust.add(forward);
+        if (keys.KeyS || keys.ArrowDown) thrust.sub(forward);
+        if (keys.KeyD || keys.ArrowRight) thrust.add(right);
+        if (keys.KeyA || keys.ArrowLeft) thrust.sub(right);
+        if (keys.Space) thrust.add(up);
+        if (keys.ShiftLeft || keys.ShiftRight) thrust.sub(up);
+        if (thrust.lengthSq() > 0) thrust.normalize().multiplyScalar(SHIP_ACCEL * dt);
+
+        ship.vel.add(thrust);
+        ship.vel.multiplyScalar(SHIP_DRAG);
+        if (ship.vel.length() > SHIP_MAX_SPEED) ship.vel.setLength(SHIP_MAX_SPEED);
+        ship.pos.addScaledVector(ship.vel, dt);
+
+        camera.position.copy(ship.pos);
+        camera.rotation.set(ship.pitch, ship.yaw, 0, "YXZ");
+      } else {
+        world.rotation.y += (pointer.x * 0.15 - world.rotation.y) * 0.02;
+        world.rotation.x += (pointer.y * 0.1 - world.rotation.x) * 0.02;
+
+        const camPoint = cameraCurve.getPointAt(Math.min(Math.max(scroll, 0), 1));
+        camera.position.copy(camPoint);
+        camera.rotation.set(0, 0, Math.sin(scroll * Math.PI) * 0.035 * motion, "YXZ");
+      }
+      wasPiloting = piloting;
 
       // The lensing effect tracks the blob's actual screen position — a real
       // black hole doesn't lens light around some fixed point in the frame.
@@ -1115,6 +1197,8 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
         if (triggerRef) triggerRef.current = null;
         window.removeEventListener("pointermove", onPointerMove);
         window.removeEventListener("click", onClick);
+        window.removeEventListener("keydown", onKeyDown);
+        window.removeEventListener("keyup", onKeyUp);
         window.removeEventListener("scroll", onScroll);
         window.removeEventListener("resize", onResize);
         if (renderer.domElement.parentNode === mount) {
@@ -1202,11 +1286,21 @@ export default function Portfolio3D() {
   const [activeSection, setActiveSection] = useState("work");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
+  const [pilotMode, setPilotMode] = useState(false);
   const shockwaveTriggerRef = useRef(null);
   const githubActivity = useGithubActivity();
   const activity = Math.min((githubActivity || 0) / 8, 1);
 
   useAmbientDrone(soundOn, scrollRef);
+
+  // Pilot mode pauses normal page scrolling — you're flying the camera
+  // yourself, so the scroll-driven dolly has nothing to drive.
+  useEffect(() => {
+    document.body.style.overflow = pilotMode ? "hidden" : "";
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [pilotMode]);
 
   useEffect(() => {
     function onKey(e) {
@@ -1215,12 +1309,13 @@ export default function Portfolio3D() {
         e.preventDefault();
         setPaletteOpen((v) => !v);
       } else if (e.key === "Escape") {
-        setPaletteOpen(false);
+        if (pilotMode) setPilotMode(false);
+        else setPaletteOpen(false);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [pilotMode]);
 
   useEffect(() => {
     const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -1354,6 +1449,23 @@ export default function Portfolio3D() {
           font-size: 11px; letter-spacing: 0.04em; color: var(--ash);
           background: rgba(11,11,10,0.8); border: 1px solid #2a2924;
           padding: 8px 12px; max-width: 240px; line-height: 1.5;
+        }
+
+        .pilot-hud { position: fixed; inset: 0; z-index: 50; pointer-events: none; }
+        .pilot-crosshair {
+          position: absolute; top: 50%; left: 50%; width: 22px; height: 22px;
+          transform: translate(-50%, -50%); border: 1px solid rgba(244,241,232,0.6); border-radius: 50%;
+        }
+        .pilot-crosshair::before, .pilot-crosshair::after {
+          content: ""; position: absolute; background: rgba(244,241,232,0.6);
+        }
+        .pilot-crosshair::before { top: 50%; left: -6px; right: -6px; height: 1px; transform: translateY(-50%); }
+        .pilot-crosshair::after { left: 50%; top: -6px; bottom: -6px; width: 1px; transform: translateX(-50%); }
+        .pilot-hint {
+          position: absolute; bottom: 34px; left: 50%; transform: translateX(-50%);
+          font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ash);
+          background: rgba(11,11,10,0.75); border: 1px solid #2a2924; padding: 8px 16px;
+          white-space: nowrap;
         }
 
         .content { position: relative; z-index: 1; }
@@ -1552,7 +1664,7 @@ export default function Portfolio3D() {
       `}</style>
 
       <BootLoader />
-      <InkCursor />
+      {!pilotMode && <InkCursor />}
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
@@ -1563,7 +1675,19 @@ export default function Portfolio3D() {
         soundOn={soundOn}
         onToggleSound={() => setSoundOn((v) => !v)}
         onShockwave={() => shockwaveTriggerRef.current?.(0, 0)}
+        pilotMode={pilotMode}
+        onTogglePilot={() => {
+          setPaletteOpen(false);
+          setPilotMode((v) => !v);
+        }}
       />
+
+      {pilotMode && (
+        <div className="pilot-hud" aria-hidden="true">
+          <div className="pilot-crosshair" />
+          <div className="pilot-hint">PILOT MODE — WASD / arrows to move · space / shift for up-down · mouse to steer · esc to exit</div>
+        </div>
+      )}
 
       {webglOK ? (
         <ThreeBackground
@@ -1572,6 +1696,7 @@ export default function Portfolio3D() {
           onUnavailable={() => setWebglOK(false)}
           activity={activity}
           triggerRef={shockwaveTriggerRef}
+          pilotMode={pilotMode}
         />
       ) : (
         <>
@@ -1598,6 +1723,16 @@ export default function Portfolio3D() {
             >
               {soundOn ? "SND ON" : "SND OFF"}
             </button>
+            {webglOK && (
+              <button
+                className="nav-util"
+                onClick={() => setPilotMode((v) => !v)}
+                aria-pressed={pilotMode}
+                aria-label="Toggle pilot mode"
+              >
+                {pilotMode ? "EXIT SHIP" : "PILOT"}
+              </button>
+            )}
           </div>
           <button className="nav-toggle" onClick={() => setNavOpen((v) => !v)}>
             {navOpen ? "Close" : "Menu"}
