@@ -1,25 +1,30 @@
 import React, { useEffect, useRef, useState } from "react";
-import * as THREE from "three";
 import katawareImg from "./assets/kataware.jpg";
+
+/* three.js is loaded lazily inside ThreeBackground's effect (dynamic
+   import()) — it's the bulk of the JS bundle and has no business gating
+   first paint of the hero text. Vite splits it into its own chunk. */
 
 /* ---------------------------------------------------------
    DESIGN NOTES (for Shadiq, not rendered)
 
-   The background reads as a schema/query graph rather than
-   abstract decoration — a nod to the actual work (databases,
-   retrieval pipelines, "trust layers"):
+   Same monochrome ink-brush language as the 2D version, now
+   driven by an actual WebGL scene instead of SVG:
 
-   - ~20 nodes laid out on a jittered Fibonacci sphere, wired
-     to their 2 nearest neighbours so the mesh reads as an
-     organic ER-diagram rather than a perfect geometric shape.
-     A few nodes are tinted rust as "hub" tables.
-   - Small glowing sprites travel back and forth along each
-     edge on a loop, standing in for a query moving across
-     joins. Hovering a node speeds up the pulses on its edges.
-   - Camera dollies backward and the graph rotates as you
-     scroll — rotation encodes read progress, not decoration.
+   - A single irregular "ink blob" (displaced icosahedron,
+     wireframe) sits at the center of the world and rotates
+     as you scroll — its rotation literally encodes how far
+     through the page you are, so it's read progress, not
+     decoration. Hovering it (and real GitHub commit activity,
+     via the live pulse feed) speeds up its rotation.
+   - A handful of hand-placed TubeGeometry "brush strokes"
+     drift slowly around it and brighten on hover.
    - A soft particle field gives depth/grain; fast scrolling
-     briefly swells the whole graph.
+     briefly swells the blob.
+   - Camera flies a designed bezier path (not a straight dolly)
+     as you scroll, with a subtle roll, and the whole render
+     goes through a hand-rolled post-process pass (chromatic
+     aberration, vignette, grain).
    - Pointer position adds gentle parallax to the whole scene.
 
    Content sits in normal document flow (real scroll, no
@@ -576,28 +581,8 @@ function isWebGLAvailable() {
   }
 }
 
-/* Small radial-gradient sprite texture, generated once and shared across
-   every node halo / pulse — cheaper than a canvas per sprite. */
-let glowTexture = null;
-function getGlowTexture() {
-  if (glowTexture) return glowTexture;
-  const size = 128;
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d");
-  const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  gradient.addColorStop(0, "rgba(255,255,255,1)");
-  gradient.addColorStop(0.4, "rgba(255,255,255,0.4)");
-  gradient.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, size, size);
-  glowTexture = new THREE.CanvasTexture(canvas);
-  return glowTexture;
-}
-
 /* ---------------- Three.js background ---------------- */
-function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, onSelectProject, activity, triggerRef }) {
+function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, triggerRef }) {
   const mountRef = useRef(null);
   const shockwaveRef = useRef({ time: 100, x: 0, y: 0, active: false });
   const scrollVelocity = useRef(0);
@@ -616,10 +601,16 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, onSelectProj
       return;
     }
 
-    let width = mount.clientWidth;
-    let height = mount.clientHeight;
+    let cancelled = false;
+    let cleanup = () => {};
 
-    const scene = new THREE.Scene();
+    import("three").then((THREE) => {
+      if (cancelled) return;
+
+      let width = mount.clientWidth;
+      let height = mount.clientHeight;
+
+      const scene = new THREE.Scene();
     scene.fog = new THREE.FogExp2(0x0b0b0a, 0.05);
 
     const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 100);
@@ -694,136 +685,60 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, onSelectProj
     const world = new THREE.Group();
     scene.add(world);
 
-    // --- schema graph: nodes + edges + traveling "query" pulses ---
-    const NODE_COUNT = 22;
-    const HUB_COUNT = Math.min(PROJECTS.length, NODE_COUNT); // one hub per featured project
-
-    // Fibonacci-sphere base layout, jittered so it reads as an organic
-    // network rather than a perfect sphere.
-    const nodePositions = [];
-    for (let i = 0; i < NODE_COUNT; i++) {
-      const y = 1 - (i / (NODE_COUNT - 1)) * 2;
-      const radiusAtY = Math.sqrt(Math.max(0, 1 - y * y));
-      const theta = i * Math.PI * (3 - Math.sqrt(5));
-      const baseRadius = 2.3 + Math.random() * 0.9;
-      const jitter = () => (Math.random() - 0.5) * 0.7;
-      nodePositions.push(
-        new THREE.Vector3(
-          Math.cos(theta) * radiusAtY * baseRadius + jitter(),
-          y * baseRadius * 0.9 + jitter(),
-          Math.sin(theta) * radiusAtY * baseRadius + jitter() - 2
-        )
-      );
+    // --- ink blob: displaced wireframe icosahedron ---
+    const blobGeo = new THREE.IcosahedronGeometry(2.1, 4);
+    const posAttr = blobGeo.attributes.position;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < posAttr.count; i++) {
+      v.fromBufferAttribute(posAttr, i);
+      const n =
+        Math.sin(v.x * 1.8 + v.z * 0.6) *
+        Math.cos(v.y * 1.4 - v.x * 0.5) *
+        Math.sin(v.z * 2.0 + v.y * 0.8);
+      const dir = v.clone().normalize();
+      v.addScaledVector(dir, n * 0.35);
+      posAttr.setXYZ(i, v.x, v.y, v.z);
     }
-
-    // Connect each node to its 2 nearest neighbours — gives a natural,
-    // ER-diagram-like mesh instead of a fully-connected blob.
-    const edgeSet = new Set();
-    const edges = [];
-    nodePositions.forEach((p, i) => {
-      nodePositions
-        .map((q, j) => (i === j ? null : { j, d: p.distanceTo(q) }))
-        .filter(Boolean)
-        .sort((a, b) => a.d - b.d)
-        .slice(0, 2)
-        .forEach(({ j }) => {
-          const key = i < j ? `${i}-${j}` : `${j}-${i}`;
-          if (!edgeSet.has(key)) {
-            edgeSet.add(key);
-            edges.push([i, j]);
-          }
-        });
+    blobGeo.computeVertexNormals();
+    const blobMat = new THREE.MeshBasicMaterial({
+      color: PAPER,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.32,
     });
+    const blob = new THREE.Mesh(blobGeo, blobMat);
+    world.add(blob);
 
-    const graph = new THREE.Group();
-    world.add(graph);
-
-    const linePositions = new Float32Array(edges.length * 6);
-    edges.forEach(([a, b], i) => {
-      linePositions.set([nodePositions[a].x, nodePositions[a].y, nodePositions[a].z], i * 6);
-      linePositions.set([nodePositions[b].x, nodePositions[b].y, nodePositions[b].z], i * 6 + 3);
-    });
-    const lineGeo = new THREE.BufferGeometry();
-    lineGeo.setAttribute("position", new THREE.BufferAttribute(linePositions, 3));
-    const lineMat = new THREE.LineBasicMaterial({ color: PAPER, transparent: true, opacity: 0.28 });
-    const lines = new THREE.LineSegments(lineGeo, lineMat);
-    graph.add(lines);
-
-    // hubOrder is an ordered array (not just a Set) so each hub can carry
-    // a stable index into PROJECTS — clicking a hub node navigates there.
-    const hubOrder = [];
-    while (hubOrder.length < HUB_COUNT) {
-      const idx = Math.floor(Math.random() * NODE_COUNT);
-      if (!hubOrder.includes(idx)) hubOrder.push(idx);
-    }
-    const hubIndices = new Set(hubOrder);
-    const nodeGeo = new THREE.IcosahedronGeometry(0.065, 1);
-    const nodes = nodePositions.map((pos, i) => {
-      const isHub = hubIndices.has(i);
-      const mat = new THREE.MeshBasicMaterial({
-        color: isHub ? RUST : PAPER,
+    // --- brush strokes: hand-placed tube curves ---
+    const strokeDefs = [PAPER, PAPER, RUST, PAPER, PAPER];
+    const strokes = [];
+    strokeDefs.forEach((color, i) => {
+      const cx = (Math.random() - 0.5) * 9;
+      const cy = (Math.random() - 0.5) * 5.5;
+      const cz = (Math.random() - 0.5) * 6 - 3;
+      const pts = [];
+      for (let j = 0; j < 5; j++) {
+        pts.push(
+          new THREE.Vector3(
+            cx + (Math.random() - 0.5) * 2.6,
+            cy + (Math.random() - 0.5) * 2.6,
+            cz + (Math.random() - 0.5) * 2.6
+          )
+        );
+      }
+      const strokeCurve = new THREE.CatmullRomCurve3(pts);
+      const tubeGeo = new THREE.TubeGeometry(strokeCurve, 48, 0.018 + Math.random() * 0.02, 8, false);
+      const tubeMat = new THREE.MeshBasicMaterial({
+        color,
         transparent: true,
-        opacity: isHub ? 0.9 : 0.7,
+        opacity: i === 2 ? 0.65 : 0.4,
       });
-      const mesh = new THREE.Mesh(nodeGeo, mat);
-      mesh.position.copy(pos);
-      mesh.scale.setScalar(isHub ? 1.6 : 1);
-      mesh.userData = {
-        baseScale: isHub ? 1.6 : 1,
-        baseOpacity: isHub ? 0.9 : 0.7,
-        isHub,
-        index: i,
-        projectIndex: isHub ? hubOrder.indexOf(i) : -1,
-      };
-
-      const halo = new THREE.Sprite(
-        new THREE.SpriteMaterial({
-          map: getGlowTexture(),
-          color: isHub ? RUST : PAPER,
-          transparent: true,
-          opacity: isHub ? 0.5 : 0.28,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-        })
-      );
-      halo.scale.setScalar(isHub ? 0.9 : 0.5);
-      mesh.add(halo);
-      mesh.userData.halo = halo;
-
-      graph.add(mesh);
-      return mesh;
+      const tube = new THREE.Mesh(tubeGeo, tubeMat);
+      tube.userData.speed = 0.04 + Math.random() * 0.07;
+      tube.userData.originalOpacity = i === 2 ? 0.65 : 0.4;
+      world.add(tube);
+      strokes.push(tube);
     });
-
-    // adjacency: which edges touch which node, so a hover can light up
-    // the joins running through it
-    const adjacency = nodes.map(() => []);
-    edges.forEach(([a, b], i) => {
-      adjacency[a].push(i);
-      adjacency[b].push(i);
-    });
-
-    // traveling pulses: one glowing sprite per edge, looping start -> end
-    const pulses = edges.map(([a, b]) => {
-      const mat = new THREE.SpriteMaterial({
-        map: getGlowTexture(),
-        color: RUST,
-        transparent: true,
-        opacity: 0,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const dot = new THREE.Sprite(mat);
-      dot.scale.setScalar(0.22);
-      dot.userData = { a, b, phase: Math.random() };
-      graph.add(dot);
-      return dot;
-    });
-
-    // Floating HTML label that names a hub node's project on hover —
-    // the affordance that tells you the graph is clickable, not just pretty.
-    const nodeLabel = document.createElement("div");
-    nodeLabel.className = "node-label";
-    mount.appendChild(nodeLabel);
 
     // --- particle field ---
     const particleCount = 260;
@@ -885,59 +800,10 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, onSelectProj
     }
     if (triggerRef) triggerRef.current = fireShockwave;
 
-    // Drag rotates the graph manually; a plain click (no drag) fires the
-    // shockwave and, if it lands on a hub node, navigates to its project.
-    // Both are scoped to clicks that land on empty background (not real
-    // content) so they never fight text selection or button/link clicks.
-    function isBackgroundTarget(target) {
-      return !target.closest(
-        "a, button, input, p, h1, h2, h3, li, .panel, .now-card, .project, .skill-chip, .tag, .nav, .palette-scrim, .boot-loader"
-      );
+    function onClick(e) {
+      fireShockwave((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
     }
-
-    const manualRotation = { x: 0, y: 0 };
-    let dragging = false;
-    let dragIsBackground = false;
-    let dragLast = null;
-    let dragTotal = 0;
-
-    function onPointerDown(e) {
-      dragIsBackground = isBackgroundTarget(e.target);
-      if (!dragIsBackground) return;
-      e.preventDefault();
-      dragging = true;
-      dragLast = { x: e.clientX, y: e.clientY };
-      dragTotal = 0;
-    }
-    function onPointerDrag(e) {
-      if (!dragging || !dragLast) return;
-      const dx = e.clientX - dragLast.x;
-      const dy = e.clientY - dragLast.y;
-      dragTotal += Math.abs(dx) + Math.abs(dy);
-      manualRotation.y += dx * 0.003;
-      manualRotation.x += dy * 0.003;
-      dragLast = { x: e.clientX, y: e.clientY };
-    }
-    function onPointerUp(e) {
-      const wasDrag = dragTotal > 6;
-      const wasBackground = dragIsBackground;
-      dragging = false;
-      dragLast = null;
-      if (wasDrag || !wasBackground) return;
-
-      const nx = (e.clientX / window.innerWidth) * 2 - 1;
-      const ny = -(e.clientY / window.innerHeight) * 2 + 1;
-      fireShockwave(nx, ny);
-
-      raycaster.setFromCamera({ x: nx, y: ny }, camera);
-      const hit = raycaster.intersectObjects(nodes)[0];
-      if (hit && hit.object.userData.isHub && onSelectProject) {
-        onSelectProject(hit.object.userData.projectIndex);
-      }
-    }
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("pointermove", onPointerDrag);
-    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("click", onClick);
 
     function onScroll() {
       const currentY = window.scrollY;
@@ -969,58 +835,49 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, onSelectProj
       // Update raycaster for interactions
       raycaster.setFromCamera(pointer, camera);
 
-      // Hover a node -> it grows/brightens and the joins running through
-      // it (its edges' traveling pulses) speed up, like a query touching it.
-      const nodeIntersects = reducedMotion ? [] : raycaster.intersectObjects(nodes);
-      const hoveredNode = nodeIntersects.length > 0 ? nodeIntersects[0].object : null;
-      const activeEdges = hoveredNode ? new Set(adjacency[hoveredNode.userData.index]) : null;
+      // Check for hover on blob
+      const blobIntersects = raycaster.intersectObject(blob);
+      const isBlobHovered = blobIntersects.length > 0;
 
-      nodes.forEach((n) => {
-        const isHovered = n === hoveredNode;
-        const targetScale = n.userData.baseScale * (isHovered ? 1.6 : 1);
-        n.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.12);
-        n.material.opacity = THREE.MathUtils.lerp(n.material.opacity, isHovered ? 1 : n.userData.baseOpacity, 0.1);
-        n.userData.halo.material.opacity = THREE.MathUtils.lerp(
-          n.userData.halo.material.opacity,
-          isHovered ? 0.85 : n.userData.isHub ? 0.5 : 0.28,
-          0.1
-        );
-      });
+      const targetBlobScale = isBlobHovered ? 1.15 : 1.0;
 
-      // Fast scrolling briefly swells the whole graph, echoing a burst of
-      // query activity rather than a static rotation.
+      // Real GitHub activity subtly speeds up the blob's idle rotation —
+      // it's meant to look more restless when there's been recent commit activity.
+      const activityBoost = 1 + (activityRef.current || 0) * 0.4;
+      const blobTargetSpeed = (isBlobHovered ? 0.25 : 0.06) * activityBoost;
+      blob.userData.currentSpeed = blob.userData.currentSpeed || 0.06;
+      blob.userData.currentSpeed += (blobTargetSpeed - blob.userData.currentSpeed) * 0.05;
+
       scrollVelocity.current *= 0.9;
-      const velocityDistort = Math.min(Math.abs(scrollVelocity.current) * 0.003, 0.25);
-      const targetGraphScale = 1 + velocityDistort;
-      graph.scale.lerp(new THREE.Vector3(targetGraphScale, targetGraphScale, targetGraphScale), 0.08);
+      const velocityDistort = Math.min(Math.abs(scrollVelocity.current) * 0.003, 0.4);
+      const currentBlobScale = targetBlobScale + velocityDistort;
 
-      graph.rotation.y = t * 0.05 * motion + scroll * Math.PI * 1.2;
-      graph.rotation.x = t * 0.02 * motion + scroll * 0.5;
+      blob.scale.lerp(new THREE.Vector3(currentBlobScale, currentBlobScale, currentBlobScale), 0.08);
 
-      // Real GitHub activity subtly speeds up every pulse — the graph is
-      // meant to look busier when there's actually been recent commit activity.
-      const activityBoost = 1 + (activityRef.current || 0) * 0.6;
+      blob.rotation.y = t * blob.userData.currentSpeed * motion + scroll * Math.PI * 1.4;
+      blob.rotation.x = t * (blob.userData.currentSpeed * 0.5) * motion + scroll * 0.6;
 
-      pulses.forEach((p, i) => {
-        const boosted = activeEdges && activeEdges.has(i);
-        p.userData.phase += 0.0035 * (boosted ? 2.4 : 1) * activityBoost * motion;
-        if (p.userData.phase > 1) p.userData.phase -= 1;
-        p.position.lerpVectors(nodePositions[p.userData.a], nodePositions[p.userData.b], p.userData.phase);
-        p.material.opacity = THREE.MathUtils.lerp(p.material.opacity, boosted ? 0.95 : 0.55, 0.1);
-      });
-
-      // Hover label: names the project a hub node links to.
-      if (hoveredNode && hoveredNode.userData.isHub) {
-        const screenPos = hoveredNode.getWorldPosition(new THREE.Vector3()).project(camera);
-        const lx = (screenPos.x * 0.5 + 0.5) * width;
-        const ly = (-screenPos.y * 0.5 + 0.5) * height;
-        const project = PROJECTS[hoveredNode.userData.projectIndex];
-        nodeLabel.textContent = project ? project.title : "";
-        nodeLabel.style.transform = `translate(${lx}px, ${ly - 26}px)`;
-        nodeLabel.style.opacity = project ? "1" : "0";
+      if (isBlobHovered && !reducedMotion) {
+        blobMat.opacity = THREE.MathUtils.lerp(blobMat.opacity, 0.6, 0.1);
       } else {
-        nodeLabel.style.opacity = "0";
+        blobMat.opacity = THREE.MathUtils.lerp(blobMat.opacity, 0.32, 0.1);
       }
+
+      strokes.forEach((s) => {
+        s.rotation.x = t * s.userData.speed * motion;
+        s.rotation.y = t * s.userData.speed * 0.7 * motion;
+
+        if (!reducedMotion) {
+          const intersects = raycaster.intersectObject(s);
+          if (intersects.length > 0) {
+            s.scale.lerp(new THREE.Vector3(1.2, 1.2, 1.2), 0.1);
+            s.material.opacity = THREE.MathUtils.lerp(s.material.opacity, 0.9, 0.1);
+          } else {
+            s.scale.lerp(new THREE.Vector3(1.0, 1.0, 1.0), 0.1);
+            s.material.opacity = THREE.MathUtils.lerp(s.material.opacity, s.userData.originalOpacity || 0.4, 0.05);
+          }
+        }
+      });
 
       particles.rotation.y = t * 0.012 * motion;
 
@@ -1114,8 +971,8 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, onSelectProj
           particles.geometry.attributes.position.needsUpdate = true;
       }
 
-      world.rotation.y += (pointer.x * 0.15 + manualRotation.y - world.rotation.y) * 0.06;
-      world.rotation.x += (pointer.y * 0.1 + manualRotation.x - world.rotation.x) * 0.06;
+      world.rotation.y += (pointer.x * 0.15 - world.rotation.y) * 0.02;
+      world.rotation.x += (pointer.y * 0.1 - world.rotation.x) * 0.02;
 
       const camPoint = cameraCurve.getPointAt(Math.min(Math.max(scroll, 0), 1));
       camera.position.copy(camPoint);
@@ -1127,41 +984,40 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, onSelectProj
       postMaterial.uniforms.uTime.value = t;
       renderer.render(postScene, postCamera);
     }
-    animate();
+      animate();
+
+      cleanup = () => {
+        cancelAnimationFrame(raf);
+        if (triggerRef) triggerRef.current = null;
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("click", onClick);
+        window.removeEventListener("scroll", onScroll);
+        window.removeEventListener("resize", onResize);
+        if (renderer.domElement.parentNode === mount) {
+          mount.removeChild(renderer.domElement);
+        }
+        blobGeo.dispose();
+        blobMat.dispose();
+        strokes.forEach((s) => {
+          s.geometry.dispose();
+          s.material.dispose();
+        });
+        particleGeo.dispose();
+        particleMat.dispose();
+        trailDots.forEach((d) => {
+          d.geometry.dispose();
+          d.material.dispose();
+        });
+        renderTarget.dispose();
+        postMaterial.dispose();
+        postQuad.geometry.dispose();
+        renderer.dispose();
+      };
+    });
 
     return () => {
-      cancelAnimationFrame(raf);
-      if (triggerRef) triggerRef.current = null;
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointermove", onPointerDrag);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onResize);
-      if (renderer.domElement.parentNode === mount) {
-        mount.removeChild(renderer.domElement);
-      }
-      if (nodeLabel.parentNode === mount) {
-        mount.removeChild(nodeLabel);
-      }
-      lineGeo.dispose();
-      lineMat.dispose();
-      nodeGeo.dispose();
-      nodes.forEach((n) => {
-        n.material.dispose();
-        n.userData.halo.material.dispose();
-      });
-      pulses.forEach((p) => p.material.dispose());
-      particleGeo.dispose();
-      particleMat.dispose();
-      trailDots.forEach((d) => {
-        d.geometry.dispose();
-        d.material.dispose();
-      });
-      renderTarget.dispose();
-      postMaterial.dispose();
-      postQuad.geometry.dispose();
-      renderer.dispose();
+      cancelled = true;
+      cleanup();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1305,14 +1161,6 @@ export default function Portfolio3D() {
           pointer-events: none; mix-blend-mode: screen;
         }
         a, button { cursor: none; }
-
-        /* Node label (floating over the WebGL canvas) */
-        .node-label {
-          position: absolute; top: 0; left: 0; z-index: 5;
-          padding: 5px 10px; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase;
-          color: var(--paper); background: rgba(11,11,10,0.85); border: 1px solid var(--rust);
-          pointer-events: none; opacity: 0; transition: opacity 0.15s ease; white-space: nowrap;
-        }
 
         /* Command palette */
         .palette-scrim {
@@ -1598,7 +1446,6 @@ export default function Portfolio3D() {
           scrollRef={scrollRef}
           reducedMotion={reducedMotion}
           onUnavailable={() => setWebglOK(false)}
-          onSelectProject={(i) => scrollToSection(`project-${i}`)}
           activity={activity}
           triggerRef={shockwaveTriggerRef}
         />
@@ -1676,7 +1523,7 @@ export default function Portfolio3D() {
           </Reveal>
           <div>
             {PROJECTS.map((p, i) => (
-              <Reveal as="article" id={`project-${i}`} className="project-wrapper" delay={i * 60} key={p.title}>
+              <Reveal as="article" className="project-wrapper" delay={i * 60} key={p.title}>
                 <TiltCard className="project panel">
                   <div className="project-top">
                     <h3 className="project-title display">{p.title}</h3>
