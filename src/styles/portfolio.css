@@ -140,6 +140,14 @@ html, body { background: var(--ink); }
   background: rgba(11,11,10,0.75); border: 1px solid #2a2924; padding: 8px 16px;
   white-space: nowrap;
 }
+/* The hint is a single long line; on a phone it ran off both edges of the
+   screen. Narrow viewports get it wrapped and boxed instead. */
+@media (max-width: 720px) {
+  .pilot-hint {
+    white-space: normal; text-align: center; line-height: 1.5;
+    max-width: min(92vw, 420px); bottom: 18px; font-size: 10px;
+  }
+}
 .beacon-label {
   position: absolute; top: 90px; left: 50%; z-index: 5;
   transform: translateX(-50%); font-size: 13px; letter-spacing: 0.08em;
@@ -151,6 +159,30 @@ html, body { background: var(--ink); }
   display: inline-block; font-size: 15px; line-height: 1;
   transition: transform 0.1s linear;
 }
+/* Touch flight controls — only mounted on coarse-pointer devices while
+   pilot mode is running. The mount is pointer-events:none, so each button
+   opts back in on its own. */
+.pilot-touch {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 55;
+  display: flex; align-items: flex-end; justify-content: space-between;
+  padding: 0 20px calc(84px + env(safe-area-inset-bottom, 0px));
+  pointer-events: none;
+}
+.pilot-touch-btn {
+  pointer-events: auto; -webkit-tap-highlight-color: transparent;
+  touch-action: none; user-select: none; -webkit-user-select: none;
+  background: rgba(11, 11, 10, 0.72); border: 1px solid var(--rust);
+  color: var(--rust); font-family: inherit; text-transform: uppercase;
+  letter-spacing: 0.08em; border-radius: 100px;
+  transition: background 0.12s ease, transform 0.12s ease;
+}
+.pilot-touch-btn:active {
+  background: rgba(154, 58, 47, 0.4); color: var(--paper); transform: scale(0.94);
+}
+.pilot-touch-thrust { width: 108px; height: 108px; font-size: 13px; }
+.pilot-touch-liftpad { display: flex; flex-direction: column; gap: 12px; pointer-events: none; }
+.pilot-touch-lift { width: 62px; height: 62px; font-size: 16px; line-height: 1; }
+
 .warp-flash {
   position: absolute; inset: 0; z-index: 60; pointer-events: none;
   background: radial-gradient(circle, #fff8e6 0%, #ffcf6b 40%, transparent 75%);
@@ -218,7 +250,16 @@ input:focus-visible {
   padding: 5px 10px; border-radius: 100px; cursor: pointer; transition: border-color 0.2s ease, color 0.2s ease;
 }
 .nav-util:hover, .nav-util[aria-pressed="true"] { border-color: var(--rust); color: var(--rust); }
-@media (max-width: 560px) { .nav-util { display: none; } }
+@media (max-width: 560px) {
+  /* The command palette and the sound toggle don't earn their space on a
+     phone, but pilot mode is the whole point of the site — it used to be
+     hidden here, so mobile visitors could never reach the ship at all. */
+  .nav-util { display: none; }
+  .nav-util-pilot {
+    display: inline-flex; align-items: center;
+    min-height: 34px; padding: 5px 14px;
+  }
+}
 .nav-links { display: flex; gap: 28px; }
 .nav-link { position: relative; opacity: 0.72; padding-bottom: 4px; transition: opacity 0.2s ease, color 0.2s ease; }
 .nav-link:hover { opacity: 1; }

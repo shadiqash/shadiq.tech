@@ -339,6 +339,55 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     let wasPiloting = false;
     camera.rotation.order = "YXZ";
 
+    /* --- touch flight controls ---
+       Pointer lock doesn't exist on a phone and the position-based fallback
+       is useless there (a tap sets an absolute pointer position and the ship
+       then spins forever), so touch gets its own scheme: drag anywhere to
+       steer, hold THRUST to fly. Drag deltas feed the same accumulator the
+       pointer-lock path uses, so all the steering maths is shared and
+       already proven — only the sensitivity differs, since a thumb drags far
+       fewer pixels than a mouse. */
+    const isTouchDevice =
+      window.matchMedia?.("(pointer: coarse)").matches ||
+      "ontouchstart" in window;
+    const TOUCH_SENSITIVITY = 0.0075; // radians per pixel of finger travel
+    const TOUCH_DELTA_SCALE = TOUCH_SENSITIVITY / MOUSE_SENSITIVITY;
+    let touchMode = false; // latched once the user actually flies by touch
+    const steerTouch = { id: null, x: 0, y: 0 };
+
+    function onTouchStart(e) {
+      if (!pilotModeRef.current) return;
+      touchMode = true;
+      if (steerTouch.id !== null) return;
+      const t = e.changedTouches[0];
+      if (!t) return;
+      steerTouch.id = t.identifier;
+      steerTouch.x = t.clientX;
+      steerTouch.y = t.clientY;
+    }
+    function onTouchMove(e) {
+      if (!pilotModeRef.current || steerTouch.id === null) return;
+      // Body overflow is already hidden in pilot mode, but iOS still
+      // rubber-band scrolls the page unless the move is cancelled outright.
+      if (e.cancelable) e.preventDefault();
+      for (const t of e.changedTouches) {
+        if (t.identifier !== steerTouch.id) continue;
+        mouseDelta.x += (t.clientX - steerTouch.x) * TOUCH_DELTA_SCALE;
+        mouseDelta.y += (t.clientY - steerTouch.y) * TOUCH_DELTA_SCALE;
+        steerTouch.x = t.clientX;
+        steerTouch.y = t.clientY;
+      }
+    }
+    function onTouchEnd(e) {
+      for (const t of e.changedTouches) {
+        if (t.identifier === steerTouch.id) steerTouch.id = null;
+      }
+    }
+    window.addEventListener("touchstart", onTouchStart, { passive: true });
+    window.addEventListener("touchmove", onTouchMove, { passive: false });
+    window.addEventListener("touchend", onTouchEnd, { passive: true });
+    window.addEventListener("touchcancel", onTouchEnd, { passive: true });
+
     // --- the ship itself: a low-poly wireframe dart matching the blob's
     // ink-line language, with animated twin-engine combustion cones ---
     const shipGroup = new THREE.Group();
@@ -859,6 +908,61 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     const beaconArrow = beaconLabel.querySelector(".beacon-arrow");
     const beaconText = beaconLabel.querySelector(".beacon-text");
 
+    /* On-screen flight controls, shown only while piloting on a touch
+       device. These go on the body, not the mount: the mount is a
+       z-index:0 stacking context, so anything inside it — however high its
+       own z-index — still paints and hit-tests below .content at z-index 1.
+       Mounted there the buttons drew correctly but every touch landed on the
+       page underneath them, so thrust silently did nothing. */
+    const touchControls = document.createElement("div");
+    touchControls.className = "pilot-touch";
+    touchControls.style.display = "none";
+    const thrustBtn = document.createElement("button");
+    thrustBtn.type = "button";
+    thrustBtn.className = "pilot-touch-btn pilot-touch-thrust";
+    thrustBtn.textContent = "THRUST";
+    thrustBtn.setAttribute("aria-label", "Hold to thrust");
+    const upBtn = document.createElement("button");
+    upBtn.type = "button";
+    upBtn.className = "pilot-touch-btn pilot-touch-lift";
+    upBtn.textContent = "▲";
+    upBtn.setAttribute("aria-label", "Hold to climb");
+    const downBtn = document.createElement("button");
+    downBtn.type = "button";
+    downBtn.className = "pilot-touch-btn pilot-touch-lift";
+    downBtn.textContent = "▼";
+    downBtn.setAttribute("aria-label", "Hold to descend");
+    const liftPad = document.createElement("div");
+    liftPad.className = "pilot-touch-liftpad";
+    liftPad.append(upBtn, downBtn);
+    touchControls.append(liftPad, thrustBtn);
+    document.body.appendChild(touchControls);
+
+    // Holding a control must not also grab the steering finger, so each
+    // button swallows its own touches before they reach the window handler.
+    const held = { thrust: false, up: false, down: false };
+    function bindHold(el, key) {
+      const press = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        held[key] = true;
+      };
+      const release = (e) => {
+        e.stopPropagation();
+        held[key] = false;
+      };
+      el.addEventListener("touchstart", press, { passive: false });
+      el.addEventListener("touchend", release, { passive: true });
+      el.addEventListener("touchcancel", release, { passive: true });
+      // Mouse fallback so the controls are testable and usable with a cursor.
+      el.addEventListener("mousedown", press);
+      el.addEventListener("mouseup", release);
+      el.addEventListener("mouseleave", release);
+    }
+    bindHold(thrustBtn, "thrust");
+    bindHold(upBtn, "up");
+    bindHold(downBtn, "down");
+
     function onScroll() {
       const currentY = window.scrollY;
       scrollVelocity.current = currentY - lastScrollY.current;
@@ -1098,6 +1202,12 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
 
       const piloting = pilotModeRef.current;
 
+      const wantTouchUI = piloting && isTouchDevice;
+      if (touchControls.dataset.on !== String(wantTouchUI)) {
+        touchControls.dataset.on = String(wantTouchUI);
+        touchControls.style.display = wantTouchUI ? "flex" : "none";
+      }
+
       if (piloting) {
         if (!wasPiloting) {
           // Just entered pilot mode — take off from wherever the scroll
@@ -1109,7 +1219,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           camera.rotation.z = 0;
         }
 
-        if (document.pointerLockElement) {
+        if (document.pointerLockElement || touchMode) {
           // Standard FPS-style mouse-look: only movement matters, there's
           // no "correct" place to park the cursor. This is the actual fix
           // for "the controls are hard" — the old scheme required holding
@@ -1139,8 +1249,9 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         if (keys.KeyS || keys.ArrowDown) thrust.sub(forward);
         if (keys.KeyD || keys.ArrowRight) thrust.add(right);
         if (keys.KeyA || keys.ArrowLeft) thrust.sub(right);
-        if (keys.Space) thrust.add(up);
-        if (keys.ShiftLeft || keys.ShiftRight) thrust.sub(up);
+        if (keys.Space || held.up) thrust.add(up);
+        if (keys.ShiftLeft || keys.ShiftRight || held.down) thrust.sub(up);
+        if (held.thrust) thrust.add(forward);
         if (thrust.lengthSq() > 0) thrust.normalize().multiplyScalar(SHIP_ACCEL * dt);
 
         /* Gravity around the core, in two tiers.
@@ -1362,6 +1473,12 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         }
       } else {
         shipGroup.visible = false;
+        // A finger still down when pilot mode ends would otherwise leave the
+        // ship under permanent thrust the next time it starts.
+        held.thrust = false;
+        held.up = false;
+        held.down = false;
+        steerTouch.id = null;
         beacons.forEach((b) => (b.group.visible = false));
         beaconLabel.style.opacity = "0";
         secretBeacon.visible = false;
@@ -1437,6 +1554,11 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         window.removeEventListener("keyup", onKeyUp);
         window.removeEventListener("scroll", onScroll);
         window.removeEventListener("resize", onResize);
+        window.removeEventListener("touchstart", onTouchStart);
+        window.removeEventListener("touchmove", onTouchMove);
+        window.removeEventListener("touchend", onTouchEnd);
+        window.removeEventListener("touchcancel", onTouchEnd);
+        touchControls.remove();
         if (renderer.domElement.parentNode === mount) {
           mount.removeChild(renderer.domElement);
         }

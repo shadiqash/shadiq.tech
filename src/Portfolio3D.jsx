@@ -40,6 +40,14 @@ export default function Portfolio3D() {
   const [pilotMode, setPilotMode] = useState(false);
   const [secretFound, setSecretFound] = useState(false);
   const shockwaveTriggerRef = useRef(null);
+  // Which flight controls to describe in the pilot hint. Read once — a
+  // device doesn't grow a mouse mid-session, and matchMedia in render would
+  // otherwise be re-evaluated on every state change.
+  const [isTouch] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      (window.matchMedia?.("(pointer: coarse)").matches || "ontouchstart" in window)
+  );
   const githubActivity = useGithubActivity();
   const activity = Math.min((githubActivity || 0) / 8, 1);
 
@@ -162,7 +170,9 @@ export default function Portfolio3D() {
       {pilotMode && (
         <div className="pilot-hud" aria-hidden="true">
           <div className="pilot-hint">
-            PILOT MODE — WASD / arrows to move · space / shift for up-down · mouse to steer · fly into a glowing marker to dock · dive into the core for something else · esc to exit
+            {isTouch
+              ? "PILOT MODE — hold THRUST to fly · drag anywhere to steer · ▲▼ for up-down · fly into a glowing marker to dock · dive into the core for something else"
+              : "PILOT MODE — WASD / arrows to move · space / shift for up-down · mouse to steer · fly into a glowing marker to dock · dive into the core for something else · esc to exit"}
           </div>
         </div>
       )}
@@ -239,7 +249,7 @@ export default function Portfolio3D() {
             </button>
             {webglOK && (
               <button
-                className="nav-util"
+                className="nav-util nav-util-pilot"
                 onClick={togglePilotMode}
                 aria-pressed={pilotMode}
                 aria-label="Toggle pilot mode"
