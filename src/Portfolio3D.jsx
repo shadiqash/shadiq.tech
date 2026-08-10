@@ -35,9 +35,18 @@ import katawareImg from "./assets/kataware.jpg";
    - Opt-in "pilot mode" (nav button / command palette / "PILOT")
      swaps the scroll-driven camera for free-flight: WASD/arrows
      + space/shift thrust, mouse position steers (offset from
-     center = turn), no pointer lock. Pauses page scroll while
-     active; Escape (or the same toggle) hands the scroll camera
-     back exactly where it left off.
+     center = turn), no pointer lock. A visible low-poly wireframe
+     ship (matching the blob's line language) flies with a
+     third-person chase camera, twin engines flaring with actual
+     combustion cones that stretch/brighten with throttle.
+   - Four glowing waypoint beacons, one per nav section, are
+     placed around the scene during pilot mode — fly close enough
+     to one and it docks you straight into that section, exiting
+     pilot mode automatically. This is the actual point of pilot
+     mode: a second, literal way to navigate the site, not just a
+     flight-sim toy layered on top of it.
+   - Escape (or the same toggle) exits without docking and hands
+     the scroll camera back exactly where it left off.
 
    Content sits in normal document flow (real scroll, no
    scroll-jacking) on top of a fixed full-viewport canvas —
@@ -600,7 +609,7 @@ function isWebGLAvailable() {
 }
 
 /* ---------------- Three.js background ---------------- */
-function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, triggerRef, pilotMode }) {
+function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, triggerRef, pilotMode, onDock }) {
   const mountRef = useRef(null);
   const shockwaveRef = useRef({ time: 100, x: 0, y: 0, active: false });
   const scrollVelocity = useRef(0);
@@ -885,9 +894,92 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
     const SHIP_ACCEL = 14;
     const SHIP_MAX_SPEED = 11;
     const SHIP_DRAG = 0.985;
-    const ship = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), yaw: 0, pitch: 0 };
+    const ship = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), yaw: 0, pitch: 0, throttle: 0 };
     let wasPiloting = false;
     camera.rotation.order = "YXZ";
+
+    // --- the ship itself: a low-poly wireframe dart matching the blob's
+    // ink-line language, with animated twin-engine combustion cones ---
+    const shipGroup = new THREE.Group();
+    shipGroup.visible = false;
+    scene.add(shipGroup);
+
+    const hullMat = new THREE.MeshBasicMaterial({ color: PAPER, wireframe: true, transparent: true, opacity: 0.9 });
+    const trimMat = new THREE.MeshBasicMaterial({ color: RUST, wireframe: true, transparent: true, opacity: 0.85 });
+
+    const bodyGeo = new THREE.ConeGeometry(0.16, 0.75, 6);
+    bodyGeo.rotateX(-Math.PI / 2);
+    const body = new THREE.Mesh(bodyGeo, hullMat);
+    shipGroup.add(body);
+
+    const cockpitGeo = new THREE.IcosahedronGeometry(0.075, 0);
+    const cockpit = new THREE.Mesh(cockpitGeo, new THREE.MeshBasicMaterial({ color: RUST, transparent: true, opacity: 0.8 }));
+    cockpit.position.set(0, 0.05, -0.18);
+    shipGroup.add(cockpit);
+
+    const wingGeo = new THREE.BoxGeometry(0.55, 0.02, 0.26);
+    [-1, 1].forEach((side) => {
+      const wing = new THREE.Mesh(wingGeo, trimMat);
+      wing.position.set(side * 0.3, -0.02, 0.12);
+      wing.rotation.z = side * 0.08;
+      shipGroup.add(wing);
+    });
+
+    const nozzleGeo = new THREE.CylinderGeometry(0.055, 0.07, 0.14, 8);
+    const flameGeo = new THREE.ConeGeometry(0.06, 0.34, 8, 1, true);
+    const engines = [-1, 1].map((side) => {
+      const nozzle = new THREE.Mesh(nozzleGeo, hullMat);
+      nozzle.position.set(side * 0.13, 0, 0.34);
+      nozzle.rotation.x = Math.PI / 2;
+      shipGroup.add(nozzle);
+
+      const flameInner = new THREE.Mesh(
+        flameGeo,
+        new THREE.MeshBasicMaterial({ color: 0xf4e4c9, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false })
+      );
+      const flameOuter = new THREE.Mesh(
+        flameGeo,
+        new THREE.MeshBasicMaterial({ color: RUST, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false })
+      );
+      [flameInner, flameOuter].forEach((f, i) => {
+        f.rotation.x = Math.PI / 2;
+        f.position.set(side * 0.13, 0, 0.42 + i * 0.02);
+        f.scale.setScalar(i === 0 ? 0.85 : 1.15);
+        shipGroup.add(f);
+      });
+      return { flameInner, flameOuter };
+    });
+
+    // --- navigation beacons: one per nav section, spread around the scene.
+    // Flying close enough "docks" — exits pilot mode and jumps you there.
+    // This is the actual point of pilot mode, not just a flight-sim toy.
+    const DOCK_RADIUS = 1.0;
+    const beacons = NAV_LINKS.map((link, i) => {
+      const angle = (i / NAV_LINKS.length) * Math.PI * 2;
+      const pos = new THREE.Vector3(Math.cos(angle) * 9, Math.sin(angle * 1.7) * 3.2, Math.sin(angle) * 9 - 1);
+      const group = new THREE.Group();
+      group.position.copy(pos);
+      group.visible = false;
+
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(0.42, 0.03, 8, 24),
+        new THREE.MeshBasicMaterial({ color: RUST, transparent: true, opacity: 0.85 })
+      );
+      group.add(ring);
+
+      const core = new THREE.Mesh(
+        new THREE.IcosahedronGeometry(0.17, 0),
+        new THREE.MeshBasicMaterial({ color: PAPER, wireframe: true, transparent: true, opacity: 0.9 })
+      );
+      group.add(core);
+
+      scene.add(group);
+      return { id: link.id, label: link.label, group, ring, core };
+    });
+
+    const beaconLabel = document.createElement("div");
+    beaconLabel.className = "beacon-label";
+    mount.appendChild(beaconLabel);
 
     function onScroll() {
       const currentY = window.scrollY;
@@ -1160,9 +1252,61 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
         if (ship.vel.length() > SHIP_MAX_SPEED) ship.vel.setLength(SHIP_MAX_SPEED);
         ship.pos.addScaledVector(ship.vel, dt);
 
-        camera.position.copy(ship.pos);
-        camera.rotation.set(ship.pitch, ship.yaw, 0, "YXZ");
+        // Position the visible ship and light its engines based on thrust.
+        shipGroup.visible = true;
+        shipGroup.position.copy(ship.pos);
+        shipGroup.rotation.set(ship.pitch, ship.yaw, 0, "YXZ");
+
+        const throttleTarget = thrust.lengthSq() > 0 ? 1 : 0.15;
+        ship.throttle = THREE.MathUtils.lerp(ship.throttle, throttleTarget, 0.12);
+        const flicker = 0.85 + Math.sin(t * 45) * 0.08 + Math.sin(t * 13) * 0.05;
+        const flameStretch = (0.5 + ship.throttle * 1.6) * flicker;
+        engines.forEach(({ flameInner, flameOuter }) => {
+          flameInner.scale.z = 0.85 * flameStretch;
+          flameOuter.scale.z = 1.15 * flameStretch;
+          flameInner.material.opacity = 0.4 + ship.throttle * 0.55;
+          flameOuter.material.opacity = (0.25 + ship.throttle * 0.4) * flicker;
+        });
+
+        // Third-person chase camera: trails behind and slightly above,
+        // banking with the ship instead of snapping rigidly to it.
+        const chaseOffset = new THREE.Vector3(0, 0.55, 2.2).applyEuler(
+          new THREE.Euler(ship.pitch * 0.4, ship.yaw, 0, "YXZ")
+        );
+        camera.position.lerp(ship.pos.clone().add(chaseOffset), 0.14);
+        camera.up.set(0, 1, 0);
+        camera.lookAt(ship.pos.clone().addScaledVector(forward, 2.5));
+
+        // Navigation beacons — fly close enough to one and it docks you
+        // straight into that section, exiting pilot mode automatically.
+        let nearestLabel = null;
+        let nearestDist = Infinity;
+        beacons.forEach((b) => {
+          b.group.visible = true;
+          b.group.rotation.y += dt * 0.6;
+          b.ring.rotation.x += dt * 0.5;
+          const dist = ship.pos.distanceTo(b.group.position);
+          const near = dist < 3.2;
+          b.group.scale.setScalar(near ? 1.35 : 1);
+          b.ring.material.opacity = near ? 1 : 0.75;
+          if (dist < nearestDist) {
+            nearestDist = dist;
+            nearestLabel = b.label;
+          }
+          if (dist < DOCK_RADIUS) onDock?.(b.id);
+        });
+        if (nearestLabel && nearestDist < 6) {
+          beaconLabel.textContent =
+            nearestDist < DOCK_RADIUS ? `DOCKING — ${nearestLabel.toUpperCase()}` : `${nearestLabel.toUpperCase()} — ${nearestDist.toFixed(1)}u`;
+          beaconLabel.style.opacity = "1";
+        } else {
+          beaconLabel.style.opacity = "0";
+        }
       } else {
+        shipGroup.visible = false;
+        beacons.forEach((b) => (b.group.visible = false));
+        beaconLabel.style.opacity = "0";
+
         world.rotation.y += (pointer.x * 0.15 - world.rotation.y) * 0.02;
         world.rotation.x += (pointer.y * 0.1 - world.rotation.x) * 0.02;
 
@@ -1204,6 +1348,9 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
         if (renderer.domElement.parentNode === mount) {
           mount.removeChild(renderer.domElement);
         }
+        if (beaconLabel.parentNode === mount) {
+          mount.removeChild(beaconLabel);
+        }
         blobGeo.dispose();
         blobMat.dispose();
         strokes.forEach((s) => {
@@ -1215,6 +1362,24 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
         trailDots.forEach((d) => {
           d.geometry.dispose();
           d.material.dispose();
+        });
+        bodyGeo.dispose();
+        cockpitGeo.dispose();
+        cockpit.material.dispose();
+        wingGeo.dispose();
+        nozzleGeo.dispose();
+        flameGeo.dispose();
+        hullMat.dispose();
+        trimMat.dispose();
+        engines.forEach(({ flameInner, flameOuter }) => {
+          flameInner.material.dispose();
+          flameOuter.material.dispose();
+        });
+        beacons.forEach((b) => {
+          b.ring.geometry.dispose();
+          b.ring.material.dispose();
+          b.core.geometry.dispose();
+          b.core.material.dispose();
         });
         renderTarget.dispose();
         postMaterial.dispose();
@@ -1452,20 +1617,17 @@ export default function Portfolio3D() {
         }
 
         .pilot-hud { position: fixed; inset: 0; z-index: 50; pointer-events: none; }
-        .pilot-crosshair {
-          position: absolute; top: 50%; left: 50%; width: 22px; height: 22px;
-          transform: translate(-50%, -50%); border: 1px solid rgba(244,241,232,0.6); border-radius: 50%;
-        }
-        .pilot-crosshair::before, .pilot-crosshair::after {
-          content: ""; position: absolute; background: rgba(244,241,232,0.6);
-        }
-        .pilot-crosshair::before { top: 50%; left: -6px; right: -6px; height: 1px; transform: translateY(-50%); }
-        .pilot-crosshair::after { left: 50%; top: -6px; bottom: -6px; width: 1px; transform: translateX(-50%); }
         .pilot-hint {
           position: absolute; bottom: 34px; left: 50%; transform: translateX(-50%);
           font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ash);
           background: rgba(11,11,10,0.75); border: 1px solid #2a2924; padding: 8px 16px;
           white-space: nowrap;
+        }
+        .beacon-label {
+          position: absolute; top: 90px; left: 50%; z-index: 5;
+          transform: translateX(-50%); font-size: 13px; letter-spacing: 0.08em;
+          color: var(--rust); background: rgba(11,11,10,0.8); border: 1px solid var(--rust);
+          padding: 8px 18px; opacity: 0; transition: opacity 0.2s ease; white-space: nowrap;
         }
 
         .content { position: relative; z-index: 1; }
@@ -1684,8 +1846,9 @@ export default function Portfolio3D() {
 
       {pilotMode && (
         <div className="pilot-hud" aria-hidden="true">
-          <div className="pilot-crosshair" />
-          <div className="pilot-hint">PILOT MODE — WASD / arrows to move · space / shift for up-down · mouse to steer · esc to exit</div>
+          <div className="pilot-hint">
+            PILOT MODE — WASD / arrows to move · space / shift for up-down · mouse to steer · fly into a glowing marker to dock · esc to exit
+          </div>
         </div>
       )}
 
@@ -1697,6 +1860,10 @@ export default function Portfolio3D() {
           activity={activity}
           triggerRef={shockwaveTriggerRef}
           pilotMode={pilotMode}
+          onDock={(id) => {
+            setPilotMode(false);
+            scrollToSection(id);
+          }}
         />
       ) : (
         <>
