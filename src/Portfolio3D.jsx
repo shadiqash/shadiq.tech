@@ -162,7 +162,7 @@ export default function Portfolio3D() {
       {pilotMode && (
         <div className="pilot-hud" aria-hidden="true">
           <div className="pilot-hint">
-            PILOT MODE — WASD / arrows to move · space / shift for up-down · mouse to steer · fly into a glowing marker to dock · esc to exit
+            PILOT MODE — WASD / arrows to move · space / shift for up-down · mouse to steer · fly into a glowing marker to dock · dive into the core for something else · esc to exit
           </div>
         </div>
       )}

@@ -151,6 +151,11 @@ html, body { background: var(--ink); }
   display: inline-block; font-size: 15px; line-height: 1;
   transition: transform 0.1s linear;
 }
+.warp-flash {
+  position: absolute; inset: 0; z-index: 60; pointer-events: none;
+  background: radial-gradient(circle, #fff8e6 0%, #ffcf6b 40%, transparent 75%);
+  opacity: 0;
+}
 
 .content { position: relative; z-index: 1; }
 

@@ -432,6 +432,65 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     scene.add(secretBeacon);
     let secretDocked = false;
 
+    // --- black hole / solar system: fly into the blob's core and the
+    // ink-brush theme gives way to an actual colorful solar system, the
+    // payoff for diving in rather than just orbiting it. A portal ring
+    // brings you back the same way, restoring everything exactly as it was.
+    const BLACKHOLE_TRIGGER_RADIUS = 1.7;
+    const DIVE_RATE = 0.6; // progress/sec once inside the trigger radius
+    const SOLAR_SYSTEM_ARRIVAL = new THREE.Vector3(0, 2, 15);
+    const PORTAL_POSITION = new THREE.Vector3(3, 2, 15);
+    const PORTAL_RADIUS = 1.3;
+    let inSolarSystem = false;
+    let diveProgress = 0;
+    let flashOpacity = 0;
+
+    const sun = new THREE.Group();
+    sun.visible = false;
+    sun.add(new THREE.Mesh(new THREE.IcosahedronGeometry(1.1, 2), new THREE.MeshBasicMaterial({ color: 0xfff2c8 })));
+    sun.add(
+      new THREE.Mesh(
+        new THREE.IcosahedronGeometry(1.7, 1),
+        new THREE.MeshBasicMaterial({ color: 0xffcf6b, transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false })
+      )
+    );
+    scene.add(sun);
+
+    const PLANET_DEFS = [
+      { color: 0x4fa3ff, radius: 0.5, orbitRadius: 4.5, speed: 0.35, tilt: 0.5 },
+      { color: 0xff6b4a, radius: 0.35, orbitRadius: 6.5, speed: 0.26, tilt: -0.7 },
+      { color: 0x3ad9c4, radius: 0.65, orbitRadius: 8.5, speed: 0.19, tilt: 0.3, ring: true },
+      { color: 0xb388ff, radius: 0.42, orbitRadius: 10.5, speed: 0.14, tilt: -0.4 },
+      { color: 0xffd24a, radius: 0.3, orbitRadius: 12.5, speed: 0.11, tilt: 0.6 },
+    ];
+    const planets = PLANET_DEFS.map((def) => {
+      const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(def.radius, 2), new THREE.MeshBasicMaterial({ color: def.color }));
+      mesh.visible = false;
+      let ring = null;
+      if (def.ring) {
+        ring = new THREE.Mesh(
+          new THREE.TorusGeometry(def.radius * 1.8, def.radius * 0.18, 8, 32),
+          new THREE.MeshBasicMaterial({ color: def.color, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
+        );
+        ring.rotation.x = Math.PI / 2.4;
+        mesh.add(ring);
+      }
+      scene.add(mesh);
+      return { ...def, mesh, ring, angle: Math.random() * Math.PI * 2 };
+    });
+
+    const portal = new THREE.Mesh(
+      new THREE.TorusGeometry(0.9, 0.09, 12, 32),
+      new THREE.MeshBasicMaterial({ color: 0x7fd4ff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false })
+    );
+    portal.position.copy(PORTAL_POSITION);
+    portal.visible = false;
+    scene.add(portal);
+
+    const warpFlash = document.createElement("div");
+    warpFlash.className = "warp-flash";
+    mount.appendChild(warpFlash);
+
     // Nearest-beacon HUD: a rotating bearing arrow + distance readout that's
     // always on while piloting, not just when close. Flying far from every
     // beacon into empty space previously left the player with zero cues
@@ -732,18 +791,83 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         if (ship.vel.length() > SHIP_MAX_SPEED) ship.vel.setLength(SHIP_MAX_SPEED);
         ship.pos.addScaledVector(ship.vel, dt);
 
+        // --- black hole dive / solar system ---
+        if (!inSolarSystem) {
+          const distToCore = ship.pos.length(); // the blob sits at the origin
+          diveProgress =
+            distToCore < BLACKHOLE_TRIGGER_RADIUS
+              ? Math.min(1, diveProgress + dt * DIVE_RATE)
+              : Math.max(0, diveProgress - dt * DIVE_RATE * 1.5); // a light brush recovers rather than committing you
+
+          if (diveProgress >= 1) {
+            inSolarSystem = true;
+            diveProgress = 0;
+            flashOpacity = 1;
+            blob.visible = false;
+            strokes.forEach((s) => (s.visible = false));
+            particles.visible = false;
+            beacons.forEach((b) => (b.group.visible = false));
+            secretBeacon.visible = false;
+            sun.visible = true;
+            planets.forEach((p) => (p.mesh.visible = true));
+            portal.visible = true;
+            ship.pos.copy(SOLAR_SYSTEM_ARRIVAL);
+            ship.vel.set(0, 0, 0);
+            ship.yaw = 0;
+            ship.pitch = -0.12;
+            scene.fog.color.setHex(0x160c26);
+            scene.fog.density = 0.035;
+          }
+        } else {
+          planets.forEach((p) => {
+            p.angle += dt * p.speed;
+            p.mesh.position.set(
+              Math.cos(p.angle) * p.orbitRadius,
+              Math.sin(p.angle * 0.6) * p.tilt,
+              Math.sin(p.angle) * p.orbitRadius
+            );
+            p.mesh.rotation.y += dt * 0.5;
+            if (p.ring) p.ring.rotation.z += dt * 0.15;
+          });
+          sun.rotation.y += dt * 0.05;
+          portal.rotation.y += dt * 0.9;
+
+          if (ship.pos.distanceTo(portal.position) < PORTAL_RADIUS) {
+            inSolarSystem = false;
+            flashOpacity = 1;
+            sun.visible = false;
+            planets.forEach((p) => (p.mesh.visible = false));
+            portal.visible = false;
+            blob.visible = true;
+            strokes.forEach((s) => (s.visible = true));
+            particles.visible = true;
+            ship.pos.set(0, 0, 6);
+            ship.vel.set(0, 0, 0);
+            ship.yaw = 0;
+            ship.pitch = 0;
+            scene.fog.color.setHex(0x0b0b0a);
+            scene.fog.density = 0.05;
+          }
+        }
+        flashOpacity = damp(flashOpacity, 0, 3, dt);
+        warpFlash.style.opacity = String(flashOpacity);
+
         // Position the visible ship and light its engines based on thrust.
         shipGroup.visible = true;
         shipGroup.position.copy(ship.pos);
         shipGroup.rotation.set(ship.pitch, ship.yaw, 0, "YXZ");
 
         // The secret marker: a slow twinkle, no HUD entry, no compass arrow.
-        secretBeacon.visible = true;
-        secretBeacon.material.opacity = 0.22 + Math.sin(t * 1.3) * 0.12;
-        secretBeacon.rotation.y += dt * 0.3;
-        if (!secretDocked && ship.pos.distanceTo(secretBeacon.position) < SECRET_DOCK_RADIUS) {
-          secretDocked = true;
-          onSecretFound?.();
+        // Only relevant in the normal area — hidden entirely inside the
+        // solar system, where it has no meaning.
+        if (!inSolarSystem) {
+          secretBeacon.visible = true;
+          secretBeacon.material.opacity = 0.22 + Math.sin(t * 1.3) * 0.12;
+          secretBeacon.rotation.y += dt * 0.3;
+          if (!secretDocked && ship.pos.distanceTo(secretBeacon.position) < SECRET_DOCK_RADIUS) {
+            secretDocked = true;
+            onSecretFound?.();
+          }
         }
 
         const throttleTarget = thrust.lengthSq() > 0 ? 1 : 0.15;
@@ -759,9 +883,10 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
 
         // Speed is felt, not just measured: widen the FOV slightly as the
         // ship accelerates, the classic racing-game trick for conveying
-        // velocity without any HUD numbers.
+        // velocity without any HUD numbers. Diving toward the core pushes
+        // it much further, selling the "falling in" sensation.
         const speedFrac = ship.vel.length() / SHIP_MAX_SPEED;
-        camera.fov = damp(camera.fov, 55 + speedFrac * 10, 6, dt);
+        camera.fov = damp(camera.fov, 55 + speedFrac * 10 + diveProgress * 25, 6, dt);
         camera.updateProjectionMatrix();
 
         // Third-person chase camera: trails behind and slightly above,
@@ -777,39 +902,44 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
 
         // Navigation beacons — fly close enough to one and it docks you
         // straight into that section, exiting pilot mode automatically.
-        let nearestLabel = null;
-        let nearestDist = Infinity;
-        let nearestBeaconPos = null;
-        beacons.forEach((b) => {
-          b.group.visible = true;
-          b.group.rotation.y += dt * 0.6;
-          b.ring.rotation.x += dt * 0.5;
-          const dist = ship.pos.distanceTo(b.group.position);
-          const near = dist < 3.2;
-          b.group.scale.setScalar(near ? 1.35 : 1);
-          b.ring.material.opacity = near ? 1 : 0.75;
-          if (dist < nearestDist) {
-            nearestDist = dist;
-            nearestLabel = b.label;
-            nearestBeaconPos = b.group.position;
+        // Meaningless inside the solar system, so skipped entirely there.
+        if (!inSolarSystem) {
+          let nearestLabel = null;
+          let nearestDist = Infinity;
+          let nearestBeaconPos = null;
+          beacons.forEach((b) => {
+            b.group.visible = true;
+            b.group.rotation.y += dt * 0.6;
+            b.ring.rotation.x += dt * 0.5;
+            const dist = ship.pos.distanceTo(b.group.position);
+            const near = dist < 3.2;
+            b.group.scale.setScalar(near ? 1.35 : 1);
+            b.ring.material.opacity = near ? 1 : 0.75;
+            if (dist < nearestDist) {
+              nearestDist = dist;
+              nearestLabel = b.label;
+              nearestBeaconPos = b.group.position;
+            }
+            if (dist < DOCK_RADIUS) onDock?.(b.id);
+          });
+          if (nearestLabel && nearestBeaconPos) {
+            beaconText.textContent =
+              nearestDist < DOCK_RADIUS
+                ? `DOCKING — ${nearestLabel.toUpperCase()}`
+                : `${nearestLabel.toUpperCase()} — ${nearestDist.toFixed(1)}u`;
+            // Bearing to the beacon relative to the ship's own facing — 0 is
+            // straight ahead, so the arrow always points the true way to turn.
+            const toBeacon = nearestBeaconPos.clone().sub(ship.pos);
+            const cos = Math.cos(-ship.yaw);
+            const sin = Math.sin(-ship.yaw);
+            const localX = toBeacon.x * cos - toBeacon.z * sin;
+            const localZ = toBeacon.x * sin + toBeacon.z * cos;
+            const bearing = Math.atan2(localX, -localZ);
+            beaconArrow.style.transform = `rotate(${bearing}rad)`;
+            beaconLabel.style.opacity = "1";
+          } else {
+            beaconLabel.style.opacity = "0";
           }
-          if (dist < DOCK_RADIUS) onDock?.(b.id);
-        });
-        if (nearestLabel && nearestBeaconPos) {
-          beaconText.textContent =
-            nearestDist < DOCK_RADIUS
-              ? `DOCKING — ${nearestLabel.toUpperCase()}`
-              : `${nearestLabel.toUpperCase()} — ${nearestDist.toFixed(1)}u`;
-          // Bearing to the beacon relative to the ship's own facing — 0 is
-          // straight ahead, so the arrow always points the true way to turn.
-          const toBeacon = nearestBeaconPos.clone().sub(ship.pos);
-          const cos = Math.cos(-ship.yaw);
-          const sin = Math.sin(-ship.yaw);
-          const localX = toBeacon.x * cos - toBeacon.z * sin;
-          const localZ = toBeacon.x * sin + toBeacon.z * cos;
-          const bearing = Math.atan2(localX, -localZ);
-          beaconArrow.style.transform = `rotate(${bearing}rad)`;
-          beaconLabel.style.opacity = "1";
         } else {
           beaconLabel.style.opacity = "0";
         }
@@ -819,6 +949,22 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         beaconLabel.style.opacity = "0";
         secretBeacon.visible = false;
         secretDocked = false;
+        warpFlash.style.opacity = "0";
+
+        // Exiting mid-warp (Escape while inside the solar system) should
+        // never leave the normal scene permanently hidden behind it.
+        blob.visible = true;
+        strokes.forEach((s) => (s.visible = true));
+        particles.visible = true;
+        sun.visible = false;
+        planets.forEach((p) => (p.mesh.visible = false));
+        portal.visible = false;
+        if (inSolarSystem) {
+          inSolarSystem = false;
+          scene.fog.color.setHex(0x0b0b0a);
+          scene.fog.density = 0.05;
+        }
+        diveProgress = 0;
 
         if (Math.abs(camera.fov - 55) > 0.01) {
           camera.fov = damp(camera.fov, 55, 6, dt);
@@ -838,8 +984,13 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
       // black hole doesn't lens light around some fixed point in the frame.
       const blobScreenPos = blob.getWorldPosition(new THREE.Vector3()).project(camera);
       postMaterial.uniforms.uLensCenter.value.set(blobScreenPos.x * 0.5 + 0.5, blobScreenPos.y * 0.5 + 0.5);
-      const targetLensStrength =
-        0.006 + (isBlobHovered ? 0.014 : 0) + Math.min(Math.abs(scrollVelocity.current) * 0.0008, 0.008);
+      // Escalates hard while diving toward the core (a real black hole's
+      // lensing intensifies right up to the event horizon), and switches
+      // off entirely once actually inside the solar system, where it's
+      // the sun/planets on screen, not the blob.
+      const targetLensStrength = inSolarSystem
+        ? 0
+        : 0.006 + (isBlobHovered ? 0.014 : 0) + Math.min(Math.abs(scrollVelocity.current) * 0.0008, 0.008) + diveProgress * 0.5;
       postMaterial.uniforms.uLensStrength.value = THREE.MathUtils.lerp(
         postMaterial.uniforms.uLensStrength.value,
         targetLensStrength,
@@ -868,6 +1019,9 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         }
         if (beaconLabel.parentNode === mount) {
           mount.removeChild(beaconLabel);
+        }
+        if (warpFlash.parentNode === mount) {
+          mount.removeChild(warpFlash);
         }
         blobGeo.dispose();
         blobMat.dispose();
@@ -901,6 +1055,20 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         });
         secretBeacon.geometry.dispose();
         secretBeacon.material.dispose();
+        sun.children.forEach((m) => {
+          m.geometry.dispose();
+          m.material.dispose();
+        });
+        planets.forEach((p) => {
+          p.mesh.geometry.dispose();
+          p.mesh.material.dispose();
+          if (p.ring) {
+            p.ring.geometry.dispose();
+            p.ring.material.dispose();
+          }
+        });
+        portal.geometry.dispose();
+        portal.material.dispose();
         renderTarget.dispose();
         postMaterial.dispose();
         postQuad.geometry.dispose();
