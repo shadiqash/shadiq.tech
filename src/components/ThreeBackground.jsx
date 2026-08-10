@@ -31,7 +31,7 @@ function isWebGLAvailable() {
   }
 }
 
-export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, triggerRef, pilotMode, onDock }) {
+export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, triggerRef, pilotMode, onDock, onSecretFound }) {
   const mountRef = useRef(null);
   const shockwaveRef = useRef({ time: 100, x: 0, y: 0, active: false });
   const scrollVelocity = useRef(0);
@@ -409,6 +409,20 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
       return { id: link.id, label: link.label, group, ring, core };
     });
 
+    // A hidden 5th marker, deliberately off the normal beacons' plane and
+    // undersized/dim — no ring, no HUD entry, no compass arrow. It doesn't
+    // navigate anywhere; finding it is the entire point. Rewards flying
+    // somewhere nobody told you to look, rather than reading nav labels.
+    const SECRET_DOCK_RADIUS = 1.3;
+    const secretBeacon = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(0.1, 0),
+      new THREE.MeshBasicMaterial({ color: PAPER, wireframe: true, transparent: true, opacity: 0.3 })
+    );
+    secretBeacon.position.set(9, 7, -9);
+    secretBeacon.visible = false;
+    scene.add(secretBeacon);
+    let secretDocked = false;
+
     // Nearest-beacon HUD: a rotating bearing arrow + distance readout that's
     // always on while piloting, not just when close. Flying far from every
     // beacon into empty space previously left the player with zero cues
@@ -696,6 +710,15 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         shipGroup.position.copy(ship.pos);
         shipGroup.rotation.set(ship.pitch, ship.yaw, 0, "YXZ");
 
+        // The secret marker: a slow twinkle, no HUD entry, no compass arrow.
+        secretBeacon.visible = true;
+        secretBeacon.material.opacity = 0.22 + Math.sin(t * 1.3) * 0.12;
+        secretBeacon.rotation.y += dt * 0.3;
+        if (!secretDocked && ship.pos.distanceTo(secretBeacon.position) < SECRET_DOCK_RADIUS) {
+          secretDocked = true;
+          onSecretFound?.();
+        }
+
         const throttleTarget = thrust.lengthSq() > 0 ? 1 : 0.15;
         ship.throttle = damp(ship.throttle, throttleTarget, 9, dt);
         const flicker = 0.85 + Math.sin(t * 45) * 0.08 + Math.sin(t * 13) * 0.05;
@@ -767,6 +790,8 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         shipGroup.visible = false;
         beacons.forEach((b) => (b.group.visible = false));
         beaconLabel.style.opacity = "0";
+        secretBeacon.visible = false;
+        secretDocked = false;
 
         if (Math.abs(camera.fov - 55) > 0.01) {
           camera.fov = damp(camera.fov, 55, 6, dt);
@@ -847,6 +872,8 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           b.core.geometry.dispose();
           b.core.material.dispose();
         });
+        secretBeacon.geometry.dispose();
+        secretBeacon.material.dispose();
         renderTarget.dispose();
         postMaterial.dispose();
         postQuad.geometry.dispose();

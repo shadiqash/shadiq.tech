@@ -38,6 +38,7 @@ export default function Portfolio3D() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [soundOn, setSoundOn] = useState(false);
   const [pilotMode, setPilotMode] = useState(false);
+  const [secretFound, setSecretFound] = useState(false);
   const shockwaveTriggerRef = useRef(null);
   const githubActivity = useGithubActivity();
   const activity = Math.min((githubActivity || 0) / 8, 1);
@@ -58,13 +59,14 @@ export default function Portfolio3D() {
         e.preventDefault();
         setPaletteOpen((v) => !v);
       } else if (e.key === "Escape") {
-        if (pilotMode) setPilotMode(false);
+        if (secretFound) setSecretFound(false);
+        else if (pilotMode) setPilotMode(false);
         else setPaletteOpen(false);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [pilotMode]);
+  }, [pilotMode, secretFound]);
 
   /* Reduced motion + scroll tracking */
   useEffect(() => {
@@ -135,6 +137,7 @@ export default function Portfolio3D() {
           triggerRef={shockwaveTriggerRef}
           pilotMode={pilotMode}
           onDock={(id) => { setPilotMode(false); scrollToSection(id); }}
+          onSecretFound={() => { setPilotMode(false); setSecretFound(true); }}
         />
       ) : (
         <>
@@ -144,6 +147,23 @@ export default function Portfolio3D() {
             flat backdrop instead of the 3D scene.
           </div>
         </>
+      )}
+
+      {secretFound && (
+        <div className="palette-scrim" onClick={() => setSecretFound(false)}>
+          <div className="secret-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="secret-sigil">shadiq=# SELECT * FROM secrets WHERE found = true;</div>
+            <p className="secret-body">
+              No foreign key points here — this marker isn't linked from any nav bar, README, or
+              sitemap. You found it by flying into empty space on a hunch, which is a pretty good
+              instinct for debugging distributed systems too.
+            </p>
+            <p className="secret-body ash">
+              If that's the kind of curiosity you'd bring to a team: shadiqpoke@gmail.com.
+            </p>
+            <div className="secret-foot">ROWS AFFECTED: 1 · esc to close</div>
+          </div>
+        </div>
       )}
 
       <div className="content">

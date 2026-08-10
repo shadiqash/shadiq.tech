@@ -76,6 +76,27 @@ html, body { background: var(--ink); }
   padding: 10px 18px; border-top: 1px solid #2a2924;
   font-size: 11px; letter-spacing: 0.05em; color: var(--ash);
 }
+
+/* Secret beacon easter egg */
+.secret-modal {
+  width: min(520px, 90vw);
+  background: var(--charcoal); border: 1px solid var(--rust);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 40px rgba(122,43,34,0.15);
+  padding: 22px 24px;
+}
+.secret-sigil {
+  color: var(--rust); font-size: 12px; letter-spacing: 0.02em;
+  margin-bottom: 18px; word-break: break-word;
+}
+.secret-body {
+  font-size: 14.5px; line-height: 1.75; margin: 0 0 16px; color: var(--paper);
+}
+.secret-body.ash { color: var(--ash); margin-bottom: 0; }
+.secret-foot {
+  margin-top: 18px; padding-top: 14px; border-top: 1px solid #2a2924;
+  font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ash);
+}
+
 /* Boot Loader */
 .boot-loader {
   position: fixed; inset: 0; z-index: 99999;
