@@ -4,6 +4,19 @@ import { NAV_LINKS } from "../data/projects";
 const PAPER = 0xf4f1e8;
 const RUST = 0x7a2b22;
 
+/* Frame-rate-independent exponential smoothing — replaces the classic
+   `current += (target - current) * fixedFactor` mistake, which visibly
+   changes speed depending on the display's refresh rate. `lambda` is
+   roughly "how many times per second it closes the gap"; higher = snappier. */
+function damp(current, target, lambda, dt) {
+  return current + (target - current) * (1 - Math.exp(-lambda * dt));
+}
+function dampVec3(vec, target, lambda, dt) {
+  vec.x = damp(vec.x, target.x, lambda, dt);
+  vec.y = damp(vec.y, target.y, lambda, dt);
+  vec.z = damp(vec.z, target.z, lambda, dt);
+}
+
 /* Cheap, dependency-free check for whether WebGL is actually usable */
 function isWebGLAvailable() {
   try {
@@ -307,7 +320,12 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
 
     const SHIP_ACCEL = 14;
     const SHIP_MAX_SPEED = 11;
-    const SHIP_DRAG = 0.985;
+    // Per-second drag (fraction of velocity kept each second), not a fixed
+    // per-frame multiplier — see the dt-scaled use below. A monitor at
+    // 144Hz used to apply the old per-frame drag 2.4x more often than a
+    // 60Hz one, making the ship feel stickier on high-refresh displays.
+    const SHIP_DRAG_PER_SEC = 0.4;
+    const STEER_RATE = 2.6; // radians/sec at full mouse deflection
     const ship = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), yaw: 0, pitch: 0, throttle: 0 };
     let wasPiloting = false;
     camera.rotation.order = "YXZ";
@@ -391,9 +409,16 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
       return { id: link.id, label: link.label, group, ring, core };
     });
 
+    // Nearest-beacon HUD: a rotating bearing arrow + distance readout that's
+    // always on while piloting, not just when close. Flying far from every
+    // beacon into empty space previously left the player with zero cues
+    // about which way to go back — this fixes that directly.
     const beaconLabel = document.createElement("div");
     beaconLabel.className = "beacon-label";
+    beaconLabel.innerHTML = '<span class="beacon-arrow">▲</span><span class="beacon-text"></span>';
     mount.appendChild(beaconLabel);
+    const beaconArrow = beaconLabel.querySelector(".beacon-arrow");
+    const beaconText = beaconLabel.querySelector(".beacon-text");
 
     function onScroll() {
       const currentY = window.scrollY;
@@ -645,8 +670,8 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           camera.rotation.z = 0;
         }
 
-        ship.yaw -= pointer.x * 0.045;
-        ship.pitch = THREE.MathUtils.clamp(ship.pitch + pointer.y * 0.03, -1.3, 1.3);
+        ship.yaw -= pointer.x * STEER_RATE * dt;
+        ship.pitch = THREE.MathUtils.clamp(ship.pitch + pointer.y * STEER_RATE * 0.65 * dt, -1.3, 1.3);
 
         const forward = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(ship.pitch, ship.yaw, 0, "YXZ"));
         const right = new THREE.Vector3(1, 0, 0).applyEuler(new THREE.Euler(0, ship.yaw, 0, "YXZ"));
@@ -662,7 +687,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         if (thrust.lengthSq() > 0) thrust.normalize().multiplyScalar(SHIP_ACCEL * dt);
 
         ship.vel.add(thrust);
-        ship.vel.multiplyScalar(SHIP_DRAG);
+        ship.vel.multiplyScalar(Math.pow(SHIP_DRAG_PER_SEC, dt));
         if (ship.vel.length() > SHIP_MAX_SPEED) ship.vel.setLength(SHIP_MAX_SPEED);
         ship.pos.addScaledVector(ship.vel, dt);
 
@@ -672,7 +697,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         shipGroup.rotation.set(ship.pitch, ship.yaw, 0, "YXZ");
 
         const throttleTarget = thrust.lengthSq() > 0 ? 1 : 0.15;
-        ship.throttle = THREE.MathUtils.lerp(ship.throttle, throttleTarget, 0.12);
+        ship.throttle = damp(ship.throttle, throttleTarget, 9, dt);
         const flicker = 0.85 + Math.sin(t * 45) * 0.08 + Math.sin(t * 13) * 0.05;
         const flameStretch = (0.5 + ship.throttle * 1.6) * flicker;
         engines.forEach(({ flameInner, flameOuter }) => {
@@ -682,12 +707,21 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           flameOuter.material.opacity = (0.25 + ship.throttle * 0.4) * flicker;
         });
 
+        // Speed is felt, not just measured: widen the FOV slightly as the
+        // ship accelerates, the classic racing-game trick for conveying
+        // velocity without any HUD numbers.
+        const speedFrac = ship.vel.length() / SHIP_MAX_SPEED;
+        camera.fov = damp(camera.fov, 55 + speedFrac * 10, 6, dt);
+        camera.updateProjectionMatrix();
+
         // Third-person chase camera: trails behind and slightly above,
-        // banking with the ship instead of snapping rigidly to it.
+        // banking with the ship instead of snapping rigidly to it. Damped
+        // (frame-rate independent) rather than a fixed-factor lerp, so it
+        // settles at the same rate on a 60Hz or a 144Hz display.
         const chaseOffset = new THREE.Vector3(0, 0.55, 2.2).applyEuler(
           new THREE.Euler(ship.pitch * 0.4, ship.yaw, 0, "YXZ")
         );
-        camera.position.lerp(ship.pos.clone().add(chaseOffset), 0.14);
+        dampVec3(camera.position, ship.pos.clone().add(chaseOffset), 6, dt);
         camera.up.set(0, 1, 0);
         camera.lookAt(ship.pos.clone().addScaledVector(forward, 2.5));
 
@@ -695,6 +729,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         // straight into that section, exiting pilot mode automatically.
         let nearestLabel = null;
         let nearestDist = Infinity;
+        let nearestBeaconPos = null;
         beacons.forEach((b) => {
           b.group.visible = true;
           b.group.rotation.y += dt * 0.6;
@@ -706,12 +741,24 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           if (dist < nearestDist) {
             nearestDist = dist;
             nearestLabel = b.label;
+            nearestBeaconPos = b.group.position;
           }
           if (dist < DOCK_RADIUS) onDock?.(b.id);
         });
-        if (nearestLabel && nearestDist < 6) {
-          beaconLabel.textContent =
-            nearestDist < DOCK_RADIUS ? `DOCKING — ${nearestLabel.toUpperCase()}` : `${nearestLabel.toUpperCase()} — ${nearestDist.toFixed(1)}u`;
+        if (nearestLabel && nearestBeaconPos) {
+          beaconText.textContent =
+            nearestDist < DOCK_RADIUS
+              ? `DOCKING — ${nearestLabel.toUpperCase()}`
+              : `${nearestLabel.toUpperCase()} — ${nearestDist.toFixed(1)}u`;
+          // Bearing to the beacon relative to the ship's own facing — 0 is
+          // straight ahead, so the arrow always points the true way to turn.
+          const toBeacon = nearestBeaconPos.clone().sub(ship.pos);
+          const cos = Math.cos(-ship.yaw);
+          const sin = Math.sin(-ship.yaw);
+          const localX = toBeacon.x * cos - toBeacon.z * sin;
+          const localZ = toBeacon.x * sin + toBeacon.z * cos;
+          const bearing = Math.atan2(localX, -localZ);
+          beaconArrow.style.transform = `rotate(${bearing}rad)`;
           beaconLabel.style.opacity = "1";
         } else {
           beaconLabel.style.opacity = "0";
@@ -720,6 +767,11 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         shipGroup.visible = false;
         beacons.forEach((b) => (b.group.visible = false));
         beaconLabel.style.opacity = "0";
+
+        if (Math.abs(camera.fov - 55) > 0.01) {
+          camera.fov = damp(camera.fov, 55, 6, dt);
+          camera.updateProjectionMatrix();
+        }
 
         world.rotation.y += (pointer.x * 0.15 - world.rotation.y) * 0.02;
         world.rotation.x += (pointer.y * 0.1 - world.rotation.x) * 0.02;

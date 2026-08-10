@@ -124,6 +124,11 @@ html, body { background: var(--ink); }
   transform: translateX(-50%); font-size: 13px; letter-spacing: 0.08em;
   color: var(--rust); background: rgba(11,11,10,0.8); border: 1px solid var(--rust);
   padding: 8px 18px; opacity: 0; transition: opacity 0.2s ease; white-space: nowrap;
+  display: flex; align-items: center; gap: 10px;
+}
+.beacon-arrow {
+  display: inline-block; font-size: 15px; line-height: 1;
+  transition: transform 0.1s linear;
 }
 
 .content { position: relative; z-index: 1; }
