@@ -51,6 +51,45 @@ export default function Portfolio3D() {
     return () => { document.body.style.overflow = ""; };
   }, [pilotMode]);
 
+  /* Pointer Lock: turns steering from "hold the mouse exactly at the
+     screen's center" (genuinely hard — the old absolute-position scheme)
+     into standard FPS-style mouse-look, where only movement matters and
+     there's no correct place to rest the cursor. Request must happen
+     inside the same synchronous click handler that toggles pilot mode on
+     (browsers require a user gesture); exit is safe to call anytime. */
+  function togglePilotMode() {
+    // Deliberately not a setState updater function: React StrictMode
+    // double-invokes those in development to check for purity, which would
+    // fire requestPointerLock/exitPointerLock twice per click and toggle
+    // the lock straight back off. Reading `pilotMode` from render scope and
+    // passing setPilotMode a plain value keeps the side effect to one call.
+    const next = !pilotMode;
+    try {
+      if (next) {
+        // Some Chromium versions return a Promise here; others don't.
+        // Either way, a failed lock is never fatal — steering just falls
+        // back to the older position-based scheme — so swallow it rather
+        // than letting an unhandled rejection hit the console (rapid
+        // toggling can legitimately trigger a WrongDocumentError).
+        document.body.requestPointerLock?.()?.catch?.(() => {});
+      } else if (document.pointerLockElement) {
+        document.exitPointerLock();
+      }
+    } catch {
+      // Synchronous throw path — same reasoning as above.
+    }
+    setPilotMode(next);
+  }
+  useEffect(() => {
+    function onLockChange() {
+      // The browser can drop pointer lock on its own (Escape, alt-tab,
+      // switching windows) — keep React's state in sync either way.
+      if (!document.pointerLockElement && pilotMode) setPilotMode(false);
+    }
+    document.addEventListener("pointerlockchange", onLockChange);
+    return () => document.removeEventListener("pointerlockchange", onLockChange);
+  }, [pilotMode]);
+
   /* ⌘K / Escape keyboard shortcuts */
   useEffect(() => {
     function onKey(e) {
@@ -117,7 +156,7 @@ export default function Portfolio3D() {
         onToggleSound={() => setSoundOn((v) => !v)}
         onShockwave={() => shockwaveTriggerRef.current?.(0, 0)}
         pilotMode={pilotMode}
-        onTogglePilot={() => { setPaletteOpen(false); setPilotMode((v) => !v); }}
+        onTogglePilot={() => { setPaletteOpen(false); togglePilotMode(); }}
       />
 
       {pilotMode && (
@@ -136,8 +175,16 @@ export default function Portfolio3D() {
           activity={activity}
           triggerRef={shockwaveTriggerRef}
           pilotMode={pilotMode}
-          onDock={(id) => { setPilotMode(false); scrollToSection(id); }}
-          onSecretFound={() => { setPilotMode(false); setSecretFound(true); }}
+          onDock={(id) => {
+            if (document.pointerLockElement) document.exitPointerLock();
+            setPilotMode(false);
+            scrollToSection(id);
+          }}
+          onSecretFound={() => {
+            if (document.pointerLockElement) document.exitPointerLock();
+            setPilotMode(false);
+            setSecretFound(true);
+          }}
         />
       ) : (
         <>
@@ -187,7 +234,7 @@ export default function Portfolio3D() {
             {webglOK && (
               <button
                 className="nav-util"
-                onClick={() => setPilotMode((v) => !v)}
+                onClick={togglePilotMode}
                 aria-pressed={pilotMode}
                 aria-label="Toggle pilot mode"
               >

@@ -282,7 +282,15 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     // --- pointer parallax & interactions ---
     const pointer = { x: 0, y: 0 };
     const raycaster = new THREE.Raycaster();
+    // Raw mouse-movement deltas, accumulated between frames — used for
+    // pilot-mode steering while the pointer is locked (see animate()).
+    const mouseDelta = { x: 0, y: 0 };
     function onPointerMove(e) {
+      if (document.pointerLockElement) {
+        mouseDelta.x += e.movementX || 0;
+        mouseDelta.y += e.movementY || 0;
+        return;
+      }
       pointer.x = (e.clientX / window.innerWidth) * 2 - 1;
       pointer.y = -(e.clientY / window.innerHeight) * 2 + 1;
     }
@@ -325,7 +333,8 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     // 144Hz used to apply the old per-frame drag 2.4x more often than a
     // 60Hz one, making the ship feel stickier on high-refresh displays.
     const SHIP_DRAG_PER_SEC = 0.4;
-    const STEER_RATE = 2.6; // radians/sec at full mouse deflection
+    const STEER_RATE = 2.6; // radians/sec at full mouse deflection (position-based fallback only)
+    const MOUSE_SENSITIVITY = 0.0026; // radians per pixel of raw mouse movement (pointer-lock steering)
     const ship = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), yaw: 0, pitch: 0, throttle: 0 };
     let wasPiloting = false;
     camera.rotation.order = "YXZ";
@@ -684,8 +693,26 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           camera.rotation.z = 0;
         }
 
-        ship.yaw -= pointer.x * STEER_RATE * dt;
-        ship.pitch = THREE.MathUtils.clamp(ship.pitch + pointer.y * STEER_RATE * 0.65 * dt, -1.3, 1.3);
+        if (document.pointerLockElement) {
+          // Standard FPS-style mouse-look: only movement matters, there's
+          // no "correct" place to park the cursor. This is the actual fix
+          // for "the controls are hard" — the old scheme required holding
+          // the mouse at the exact center of the screen to fly straight.
+          ship.yaw -= mouseDelta.x * MOUSE_SENSITIVITY;
+          ship.pitch = THREE.MathUtils.clamp(ship.pitch - mouseDelta.y * MOUSE_SENSITIVITY, -1.3, 1.3);
+          // Only clear the buffer once it's actually been applied — there's
+          // an inherent one-frame gap between requesting pointer lock and it
+          // engaging, and clearing unconditionally on every frame (including
+          // frames that took the fallback branch below) silently threw away
+          // real accumulated mouse input during that gap.
+          mouseDelta.x = 0;
+          mouseDelta.y = 0;
+        } else {
+          // Fallback if pointer lock is unavailable/denied: the older
+          // position-relative-to-center scheme, worse but functional.
+          ship.yaw -= pointer.x * STEER_RATE * dt;
+          ship.pitch = THREE.MathUtils.clamp(ship.pitch + pointer.y * STEER_RATE * 0.65 * dt, -1.3, 1.3);
+        }
 
         const forward = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(ship.pitch, ship.yaw, 0, "YXZ"));
         const right = new THREE.Vector3(1, 0, 0).applyEuler(new THREE.Euler(0, ship.yaw, 0, "YXZ"));
