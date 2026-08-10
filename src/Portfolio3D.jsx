@@ -15,16 +15,22 @@ import katawareImg from "./assets/kataware.jpg";
      wireframe) sits at the center of the world and rotates
      as you scroll — its rotation literally encodes how far
      through the page you are, so it's read progress, not
-     decoration. Hovering it (and real GitHub commit activity,
-     via the live pulse feed) speeds up its rotation.
+     decoration. Hovering it (and real GitHub commit activity)
+     speeds up its rotation.
    - A handful of hand-placed TubeGeometry "brush strokes"
      drift slowly around it and brighten on hover.
-   - A soft particle field gives depth/grain; fast scrolling
-     briefly swells the blob.
+   - The particle field is a real N-body gravity simulation, not
+     a scripted animation: every particle is pulled toward the
+     blob and weakly toward every other particle (full O(n^2)
+     pairwise gravity, integrated with an actual velocity each
+     frame — no shortcuts). The pointer is a second, movable
+     gravity well; a click is a brief repulsive kick on top.
+   - The post-process pass (chromatic aberration, vignette,
+     grain) also bends sampled UVs around the blob's screen
+     position — a small gravitational-lensing effect that tracks
+     the blob and intensifies slightly on hover.
    - Camera flies a designed bezier path (not a straight dolly)
-     as you scroll, with a subtle roll, and the whole render
-     goes through a hand-rolled post-process pass (chromatic
-     aberration, vignette, grain).
+     as you scroll, with a subtle roll.
    - Pointer position adds gentle parallax to the whole scene.
 
    Content sits in normal document flow (real scroll, no
@@ -647,6 +653,8 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
         tDiffuse: { value: renderTarget.texture },
         uTime: { value: 0 },
         uResolution: { value: new THREE.Vector2(width, height) },
+        uLensCenter: { value: new THREE.Vector2(0.5, 0.5) },
+        uLensStrength: { value: 0 },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -659,17 +667,27 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
         uniform sampler2D tDiffuse;
         uniform float uTime;
         uniform vec2 uResolution;
+        uniform vec2 uLensCenter;
+        uniform float uLensStrength;
         varying vec2 vUv;
         float hash(vec2 p) { return fract(sin(dot(p, vec2(41.0, 289.0))) * 43758.5453); }
         void main() {
           vec2 uv = vUv;
+
+          // Gravitational lensing: bend the sampled UVs around the blob's
+          // screen position, the way real light curves past a real mass.
+          vec2 toLens = uv - uLensCenter;
+          float lensDist = length(toLens);
+          float bend = min(uLensStrength / (lensDist * lensDist * 12.0 + 0.15), 0.06);
+          vec2 lensedUv = lensDist > 0.0001 ? uv - (toLens / lensDist) * bend : uv;
+
           vec2 center = uv - 0.5;
           float dist = length(center);
           vec2 dir = dist > 0.0001 ? normalize(center) : vec2(0.0);
           float aberration = dist * 0.004;
-          float r = texture2D(tDiffuse, uv - dir * aberration).r;
-          float g = texture2D(tDiffuse, uv).g;
-          float b = texture2D(tDiffuse, uv + dir * aberration).b;
+          float r = texture2D(tDiffuse, lensedUv - dir * aberration).r;
+          float g = texture2D(tDiffuse, lensedUv).g;
+          float b = texture2D(tDiffuse, lensedUv + dir * aberration).b;
           vec3 color = vec3(r, g, b);
           float vignette = smoothstep(0.9, 0.25, dist);
           color *= mix(0.5, 1.0, vignette);
@@ -740,26 +758,49 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
       strokes.push(tube);
     });
 
-    // --- particle field ---
+    // --- particle field: a real N-body gravity system, not a scripted
+    // animation. Every particle is pulled toward the blob (the dominant
+    // mass) and weakly toward every other particle via full O(n^2) pairwise
+    // gravity — no Barnes-Hut, no spatial partitioning, on purpose. 260
+    // particles is ~34k pairs/frame, which a modern JS engine chews through
+    // without a second thought.
+    const GRAV_BLOB = 5.5;
+    const GRAV_MUTUAL = 0.15;
+    const GRAV_POINTER = 3.5;
+    const GRAV_SOFTEN = 1.1; // avoids the classic N-body singularity at r -> 0
+
     const particleCount = 260;
     const positions = new Float32Array(particleCount * 3);
-    const originalPositions = new Float32Array(particleCount * 3);
+    const velocities = new Float32Array(particleCount * 3);
     for (let i = 0; i < particleCount; i++) {
-      const px = (Math.random() - 0.5) * 22;
-      const py = (Math.random() - 0.5) * 15;
-      const pz = (Math.random() - 0.5) * 32 - 6;
+      const radius = 3 + Math.random() * 11;
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(Math.random() * 2 - 1);
+      const px = radius * Math.sin(phi) * Math.cos(theta);
+      const py = radius * Math.sin(phi) * Math.sin(theta) * 0.7; // flattens toward a disk
+      const pz = radius * Math.cos(phi);
       positions[i * 3] = px;
       positions[i * 3 + 1] = py;
       positions[i * 3 + 2] = pz;
-      originalPositions[i * 3] = px;
-      originalPositions[i * 3 + 1] = py;
-      originalPositions[i * 3 + 2] = pz;
+
+      // Tangential starting velocity so this reads as an orbiting system
+      // from frame one, not a slow collapse — real mutual gravity will
+      // perturb these into something messier (and more alive) over time.
+      const toCenter = new THREE.Vector3(px, py, pz);
+      const r = Math.max(toCenter.length(), 0.001);
+      let tangent = new THREE.Vector3().crossVectors(toCenter, new THREE.Vector3(0, 1, 0));
+      if (tangent.lengthSq() < 1e-6) tangent.set(1, 0, 0);
+      tangent.normalize();
+      const orbitalSpeed = Math.sqrt(GRAV_BLOB / (r + GRAV_SOFTEN)) * (0.7 + Math.random() * 0.6);
+      velocities[i * 3] = tangent.x * orbitalSpeed;
+      velocities[i * 3 + 1] = tangent.y * orbitalSpeed;
+      velocities[i * 3 + 2] = tangent.z * orbitalSpeed;
     }
     const particleGeo = new THREE.BufferGeometry();
     particleGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
     const particleMat = new THREE.PointsMaterial({
       color: PAPER,
-      size: 0.022,
+      size: 0.032,
       transparent: true,
       opacity: 0.45,
       sizeAttenuation: true,
@@ -824,6 +865,7 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
     window.addEventListener("resize", onResize);
 
     let raf;
+    let lastT = 0;
     const clock = new THREE.Clock();
 
     function animate() {
@@ -915,60 +957,130 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
           if (shockwaveRef.current.time > 1.0) shockwaveRef.current.active = false; 
       }
 
-      // Particle Repulsion Logic
-      if (!reducedMotion && mousePos) {
-          const localMousePos = mousePos.clone();
-          world.worldToLocal(localMousePos);
+      // --- N-body gravity step ---
+      // Real inverse-square gravity, integrated with an actual velocity each
+      // frame: the blob and the pointer are gravity wells, every particle
+      // also pulls on every other particle (full O(n^2), no shortcuts), and
+      // a shockwave click is a brief repulsive kick on top of all that.
+      const dt = Math.min(Math.max(t - lastT, 0), 0.05) * motion;
+      lastT = t;
 
-          const particlePositions = particles.geometry.attributes.position.array;
-          for (let i = 0; i < particleCount; i++) {
-             const ix = i * 3;
-             const iy = i * 3 + 1;
-             const iz = i * 3 + 2;
-             
-             const ox = originalPositions[ix];
-             const oy = originalPositions[iy];
-             const oz = originalPositions[iz];
-             
-             const dx = ox - localMousePos.x;
-             const dy = oy - localMousePos.y;
-             const dz = oz - localMousePos.z;
-             const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-             
-             let tx = ox;
-             let ty = oy;
-             let tz = oz;
+      if (dt > 0) {
+        const particlePositions = particles.geometry.attributes.position.array;
 
-             const repulseRadius = 4.0;
-             if (dist < repulseRadius && dist > 0) {
-                 const force = (repulseRadius - dist) / repulseRadius;
-                 tx = ox + (dx / dist) * force * 2.0;
-                 ty = oy + (dy / dist) * force * 2.0;
-                 tz = oz + (dz / dist) * force * 2.0;
-             }
+        let pointerWorld = null;
+        if (!reducedMotion && mousePos) {
+          pointerWorld = mousePos.clone();
+          world.worldToLocal(pointerWorld);
+        }
 
-             // Shockwave effect
-             if (shockwavePos) {
-                 const sdx = tx - shockwavePos.x;
-                 const sdy = ty - shockwavePos.y;
-                 const sdz = tz - shockwavePos.z;
-                 const sdist = Math.sqrt(sdx*sdx + sdy*sdy + sdz*sdz);
-                 
-                 const swRadius = shockwaveRef.current.time * 30.0; // ring expands fast
-                 const swThickness = 3.0;
-                 if (sdist > 0 && Math.abs(sdist - swRadius) < swThickness) {
-                     const sforce = (1 - Math.abs(sdist - swRadius) / swThickness) * 8.0; 
-                     tx += (sdx / sdist) * sforce;
-                     ty += (sdy / sdist) * sforce;
-                     tz += (sdz / sdist) * sforce;
-                 }
-             }
+        for (let i = 0; i < particleCount; i++) {
+          const ix = i * 3;
+          const iy = i * 3 + 1;
+          const iz = i * 3 + 2;
+          const px = particlePositions[ix];
+          const py = particlePositions[iy];
+          const pz = particlePositions[iz];
 
-             particlePositions[ix] += (tx - particlePositions[ix]) * 0.1;
-             particlePositions[iy] += (ty - particlePositions[iy]) * 0.1;
-             particlePositions[iz] += (tz - particlePositions[iz]) * 0.1;
+          // Gravity toward the blob, sitting at the origin.
+          const rx = -px, ry = -py, rz = -pz;
+          const rSq = rx * rx + ry * ry + rz * rz + GRAV_SOFTEN * GRAV_SOFTEN;
+          const invR = 1 / Math.sqrt(rSq);
+          const blobForce = GRAV_BLOB * invR * invR * invR;
+          let ax = rx * blobForce;
+          let ay = ry * blobForce;
+          let az = rz * blobForce;
+
+          // The pointer is a second, movable gravity well.
+          if (pointerWorld) {
+            const dx = pointerWorld.x - px;
+            const dy = pointerWorld.y - py;
+            const dz = pointerWorld.z - pz;
+            const dSq = dx * dx + dy * dy + dz * dz + GRAV_SOFTEN * GRAV_SOFTEN;
+            const invD = 1 / Math.sqrt(dSq);
+            const pointerForce = GRAV_POINTER * invD * invD * invD;
+            ax += dx * pointerForce;
+            ay += dy * pointerForce;
+            az += dz * pointerForce;
           }
-          particles.geometry.attributes.position.needsUpdate = true;
+
+          // A shockwave click is a sharp transient kick, not gravity.
+          if (shockwavePos) {
+            const sdx = px - shockwavePos.x;
+            const sdy = py - shockwavePos.y;
+            const sdz = pz - shockwavePos.z;
+            const sdist = Math.sqrt(sdx * sdx + sdy * sdy + sdz * sdz);
+            const swRadius = shockwaveRef.current.time * 30.0;
+            const swThickness = 3.0;
+            if (sdist > 0 && Math.abs(sdist - swRadius) < swThickness) {
+              const sforce = (1 - Math.abs(sdist - swRadius) / swThickness) * 10.0;
+              ax += (sdx / sdist) * sforce;
+              ay += (sdy / sdist) * sforce;
+              az += (sdz / sdist) * sforce;
+            }
+          }
+
+          velocities[ix] += ax * dt;
+          velocities[iy] += ay * dt;
+          velocities[iz] += az * dt;
+        }
+
+        // Mutual particle-particle gravity: every pair, every frame.
+        for (let i = 0; i < particleCount; i++) {
+          const ix = i * 3, iy = i * 3 + 1, iz = i * 3 + 2;
+          for (let j = i + 1; j < particleCount; j++) {
+            const jx = j * 3, jy = j * 3 + 1, jz = j * 3 + 2;
+            const dx = particlePositions[jx] - particlePositions[ix];
+            const dy = particlePositions[jy] - particlePositions[iy];
+            const dz = particlePositions[jz] - particlePositions[iz];
+            const dSq = dx * dx + dy * dy + dz * dz + GRAV_SOFTEN * GRAV_SOFTEN;
+            const invD = 1 / Math.sqrt(dSq);
+            const f = GRAV_MUTUAL * invD * invD * invD * dt;
+            const fx = dx * f, fy = dy * f, fz = dz * f;
+            velocities[ix] += fx;
+            velocities[iy] += fy;
+            velocities[iz] += fz;
+            velocities[jx] -= fx;
+            velocities[jy] -= fy;
+            velocities[jz] -= fz;
+          }
+        }
+
+        for (let i = 0; i < particleCount; i++) {
+          const ix = i * 3, iy = i * 3 + 1, iz = i * 3 + 2;
+
+          // Very light damping — just enough that the discrete integration
+          // (plus shockwave kicks) can't pump energy in forever, without
+          // decaying real orbits into a collapsed clump within a minute.
+          velocities[ix] *= 0.9998;
+          velocities[iy] *= 0.9998;
+          velocities[iz] *= 0.9998;
+
+          particlePositions[ix] += velocities[ix] * dt;
+          particlePositions[iy] += velocities[iy] * dt;
+          particlePositions[iz] += velocities[iz] * dt;
+
+          // Soft containment: a chaotic N-body system can otherwise drift
+          // out of frame, or a close pass can fling a particle to infinity.
+          const r = Math.sqrt(
+            particlePositions[ix] * particlePositions[ix] +
+              particlePositions[iy] * particlePositions[iy] +
+              particlePositions[iz] * particlePositions[iz]
+          );
+          if (r > 16) {
+            const pull = (r - 16) * 0.02;
+            particlePositions[ix] -= (particlePositions[ix] / r) * pull;
+            particlePositions[iy] -= (particlePositions[iy] / r) * pull;
+            particlePositions[iz] -= (particlePositions[iz] / r) * pull;
+          } else if (r < 0.5 && r > 0.0001) {
+            const push = (0.5 - r) * 0.05;
+            particlePositions[ix] += (particlePositions[ix] / r) * push;
+            particlePositions[iy] += (particlePositions[iy] / r) * push;
+            particlePositions[iz] += (particlePositions[iz] / r) * push;
+          }
+        }
+
+        particles.geometry.attributes.position.needsUpdate = true;
       }
 
       world.rotation.y += (pointer.x * 0.15 - world.rotation.y) * 0.02;
@@ -977,6 +1089,18 @@ function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, tr
       const camPoint = cameraCurve.getPointAt(Math.min(Math.max(scroll, 0), 1));
       camera.position.copy(camPoint);
       camera.rotation.z = Math.sin(scroll * Math.PI) * 0.035 * motion;
+
+      // The lensing effect tracks the blob's actual screen position — a real
+      // black hole doesn't lens light around some fixed point in the frame.
+      const blobScreenPos = blob.getWorldPosition(new THREE.Vector3()).project(camera);
+      postMaterial.uniforms.uLensCenter.value.set(blobScreenPos.x * 0.5 + 0.5, blobScreenPos.y * 0.5 + 0.5);
+      const targetLensStrength =
+        0.006 + (isBlobHovered ? 0.014 : 0) + Math.min(Math.abs(scrollVelocity.current) * 0.0008, 0.008);
+      postMaterial.uniforms.uLensStrength.value = THREE.MathUtils.lerp(
+        postMaterial.uniforms.uLensStrength.value,
+        targetLensStrength,
+        0.05
+      );
 
       renderer.setRenderTarget(renderTarget);
       renderer.render(scene, camera);
