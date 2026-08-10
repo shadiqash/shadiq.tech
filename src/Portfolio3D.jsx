@@ -220,7 +220,12 @@ export default function Portfolio3D() {
         <nav className="nav">
           <div className="nav-left">
             <span className="nav-mark">SHADIQ /</span>
-            <button className="nav-util" onClick={() => setPaletteOpen(true)} aria-label="Open command menu">
+            <button
+              className="nav-util"
+              onClick={() => setPaletteOpen(true)}
+              aria-label="Open command menu"
+              title="Command menu — jump to a section, copy my email, grab my résumé"
+            >
               ⌘K
             </button>
             <button
@@ -228,6 +233,7 @@ export default function Portfolio3D() {
               onClick={() => setSoundOn((v) => !v)}
               aria-pressed={soundOn}
               aria-label="Toggle ambient sound"
+              title="Ambient soundtrack"
             >
               {soundOn ? "SND ON" : "SND OFF"}
             </button>
@@ -237,6 +243,11 @@ export default function Portfolio3D() {
                 onClick={togglePilotMode}
                 aria-pressed={pilotMode}
                 aria-label="Toggle pilot mode"
+                title={
+                  pilotMode
+                    ? "Leave the ship and go back to scrolling"
+                    : "Fly a ship through the background — WASD to move, mouse to steer, dock at a marker to jump to a section"
+                }
               >
                 {pilotMode ? "EXIT SHIP" : "PILOT"}
               </button>

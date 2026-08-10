@@ -202,6 +202,14 @@ input:focus-visible {
   padding: 22px clamp(20px, 5vw, 56px);
   font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase;
 }
+/* The nav is fixed over a transparent background, so page copy used to
+   scroll straight through it and collide with the logo and links. A soft
+   top-down scrim keeps the bar legible without introducing a hard edge. */
+.nav::before {
+  content: ""; position: absolute; inset: -8px 0 auto 0; height: 200%;
+  background: linear-gradient(to bottom, rgba(11, 10, 9, 0.94) 0%, rgba(11, 10, 9, 0.72) 45%, rgba(11, 10, 9, 0) 100%);
+  pointer-events: none; z-index: -1;
+}
 .nav-left { display: flex; align-items: center; gap: 12px; }
 .nav-mark { font-family: 'Big Shoulders Display', sans-serif; font-weight: 800; font-size: 20px; letter-spacing: 0.02em; }
 .nav-util {
@@ -222,9 +230,25 @@ input:focus-visible {
 .nav-link.active .brush-underline { opacity: 1; }
 .nav-link.active .brush-underline .brush-path { stroke: var(--rust); stroke-dashoffset: 0; }
 .nav-toggle { display: none; background: none; border: none; color: var(--paper); font-family: inherit; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; }
+/* Touch targets. The nav toggle rendered 47x19 and the contact links ~23px
+   tall — comfortably under the 44px minimum, and the single hardest thing to
+   hit on the site was the only navigation control mobile visitors get. The
+   box grows without moving the text: padding plus a centred flex box. */
+@media (pointer: coarse), (max-width: 720px) {
+  .nav-toggle,
+  .contact-links a,
+  .nav-links.open .nav-link {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .nav-toggle { padding: 0 6px; margin-right: -6px; }
+  .contact-links { gap: 4px 40px; }
+}
+
 @media (max-width: 720px) {
   .nav-links { display: none; }
-  .nav-toggle { display: block; }
+  .nav-toggle { display: inline-flex; align-items: center; }
   .nav-links.open { display: flex; position: fixed; top: 60px; right: 20px; background: var(--charcoal); border: 1px solid #2a2924; padding: 16px 22px; flex-direction: column; gap: 14px; }
 }
 
