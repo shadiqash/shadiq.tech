@@ -53,10 +53,20 @@ export default function Portfolio3D() {
 
   useAmbientDrone(soundOn, scrollRef);
 
-  /* Pilot mode pauses normal page scrolling */
+  /* Pilot mode pauses normal page scrolling. It also has to disable the
+     browser's own touch gestures: with only the THRUST/lift buttons marked
+     touch-action:none, holding one of them and dragging a second finger
+     elsewhere read as a pinch/zoom attempt to the browser, which hijacked
+     both touches — thrust and steering couldn't be used together. */
   useEffect(() => {
     document.body.style.overflow = pilotMode ? "hidden" : "";
-    return () => { document.body.style.overflow = ""; };
+    document.body.style.touchAction = pilotMode ? "none" : "";
+    document.body.style.overscrollBehavior = pilotMode ? "none" : "";
+    return () => {
+      document.body.style.overflow = "";
+      document.body.style.touchAction = "";
+      document.body.style.overscrollBehavior = "";
+    };
   }, [pilotMode]);
 
   /* Pointer Lock: turns steering from "hold the mouse exactly at the
