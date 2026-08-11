@@ -496,6 +496,15 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     let diveProgress = 0;
     let flashOpacity = 0;
     let captured = false; // past the horizon — thrust no longer saves you
+    // Ship spawn keeps continuity with wherever the scroll camera currently
+    // is, so entering pilot mode can start you as close as ~1.8 units from
+    // the origin — inside the horizon itself at some scroll positions. A
+    // fixed grace timer was tried and rejected: it only delayed the fall by
+    // a second, so a player who read the HUD and did nothing still got
+    // yanked into an unrequested warp with zero input. Gravity now arms on
+    // the player's first actual thrust input instead — sitting still never
+    // triggers it, at any spawn distance, for any length of time.
+    let hasThrustedSinceEntry = false;
 
     /* Value noise + fBm, used to paint every planet's surface procedurally.
        Textures are generated rather than fetched so the whole thing stays a
@@ -1217,6 +1226,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           ship.yaw = camera.rotation.y;
           ship.pitch = camera.rotation.x;
           camera.rotation.z = 0;
+          hasThrustedSinceEntry = false;
         }
 
         if (document.pointerLockElement || touchMode) {
@@ -1252,7 +1262,10 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         if (keys.Space || held.up) thrust.add(up);
         if (keys.ShiftLeft || keys.ShiftRight || held.down) thrust.sub(up);
         if (held.thrust) thrust.add(forward);
-        if (thrust.lengthSq() > 0) thrust.normalize().multiplyScalar(SHIP_ACCEL * dt);
+        if (thrust.lengthSq() > 0) {
+          hasThrustedSinceEntry = true;
+          thrust.normalize().multiplyScalar(SHIP_ACCEL * dt);
+        }
 
         /* Gravity around the core, in two tiers.
 
@@ -1269,7 +1282,8 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
            past the horizon is what a black hole actually is, and it's the
            only version of this that's reliably reachable by flying. */
         const distToCore = ship.pos.length();
-        if (!inSolarSystem && distToCore < BLACKHOLE_TRIGGER_RADIUS) captured = true;
+        const gravityArmed = hasThrustedSinceEntry;
+        if (gravityArmed && !inSolarSystem && distToCore < BLACKHOLE_TRIGGER_RADIUS) captured = true;
 
         if (captured) {
           ship.vel.addScaledVector(thrust, 0.12);
@@ -1279,7 +1293,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           ship.vel.multiplyScalar(Math.pow(0.02, dt));
         } else {
           ship.vel.add(thrust);
-          if (!inSolarSystem && distToCore < CAPTURE_RADIUS && distToCore > 0.0001) {
+          if (gravityArmed && !inSolarSystem && distToCore < CAPTURE_RADIUS && distToCore > 0.0001) {
             const pull = 1 - distToCore / CAPTURE_RADIUS;
             ship.vel.addScaledVector(ship.pos, (-CAPTURE_ACCEL * pull * dt) / distToCore);
           }
@@ -1293,7 +1307,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         if (!inSolarSystem) {
           const distToCore = ship.pos.length(); // the blob sits at the origin
           diveProgress =
-            distToCore < BLACKHOLE_TRIGGER_RADIUS
+            gravityArmed && distToCore < BLACKHOLE_TRIGGER_RADIUS
               ? Math.min(1, diveProgress + dt * DIVE_RATE)
               : Math.max(0, diveProgress - dt * DIVE_RATE * 1.5); // a light brush recovers rather than committing you
 
