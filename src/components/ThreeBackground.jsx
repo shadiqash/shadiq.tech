@@ -369,6 +369,14 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     const tumbleDeltaScratch = new THREE.Quaternion();
     const tumbleEulerScratch = new THREE.Euler();
     let wasPiloting = false;
+    // Characters spend their first moments in pilot mode spiraling out of
+    // the blob's position into their real on-screen spot — the same
+    // gravity well the site already treats as a black hole, so launching
+    // reads as the page getting sucked toward it and flung back out as
+    // debris, rather than the text just appearing.
+    let pilotEntryStart = -1;
+    const pilotEntryVortexLocal = new THREE.Vector3();
+    const SUCK_IN_DURATION = 0.9;
     camera.rotation.order = "YXZ";
 
     /* --- touch flight controls ---
@@ -1330,6 +1338,14 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
             contentGroup.rotation.set(0, 0, 0);
             contentGroup.updateMatrixWorld(true);
 
+            // The blob sits at the world origin and never moves — the same
+            // point the "dive into the core" black hole is centered on —
+            // so it doubles as the vortex every character spirals out of
+            // on launch.
+            pilotEntryStart = t;
+            pilotEntryVortexLocal.set(0, 0, 0);
+            contentGroup.worldToLocal(pilotEntryVortexLocal);
+
             // Where each character starts: unproject its on-screen rect back
             // into world space, the same spot it visually occupied a moment
             // ago — exact, since every fragment here is already confirmed
@@ -1371,7 +1387,9 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
               const frag = new CSS3DObject(span);
               frag.scale.setScalar(FRAGMENT_SCALE);
 
-              frag.position.copy(screenToLocalStart(rect));
+              frag.userData.restPos = screenToLocalStart(rect);
+              frag.userData.spiralTurns = 1.3 + Math.random() * 1.1;
+              frag.position.copy(pilotEntryVortexLocal);
               frag.quaternion.copy(camera.quaternion);
 
               frag.userData.velocity = new THREE.Vector3(0, 0, 0);
@@ -1660,9 +1678,43 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           const localShipPos = contentGroup.worldToLocal(ship.pos.clone());
           const tumbleDelta = tumbleDeltaScratch;
           const tumbleEuler = tumbleEulerScratch;
+          const sinceEntry = pilotEntryStart >= 0 ? t - pilotEntryStart : Infinity;
+          const suckingIn = sinceEntry < SUCK_IN_DURATION;
+          const suckFrac = suckingIn ? THREE.MathUtils.clamp(sinceEntry / SUCK_IN_DURATION, 0, 1) : 1;
 
           contentPanels.forEach((p) => {
             const u = p.userData;
+
+            if (suckingIn) {
+              // Launch: spiral out of the vortex center toward the
+              // character's real position, unwinding as it settles —
+              // reads as the page getting sucked toward the blob and
+              // flung back out as debris.
+              const eased = 1 - Math.pow(1 - suckFrac, 3);
+              const dx = u.restPos.x - pilotEntryVortexLocal.x;
+              const dy = u.restPos.y - pilotEntryVortexLocal.y;
+              const dz = u.restPos.z - pilotEntryVortexLocal.z;
+              const targetRadius = Math.sqrt(dx * dx + dz * dz);
+              const baseAngle = Math.atan2(dz, dx);
+              const spinAngle = baseAngle + (1 - eased) * u.spiralTurns * Math.PI * 2;
+              const r = targetRadius * eased;
+              p.position.set(
+                pilotEntryVortexLocal.x + Math.cos(spinAngle) * r,
+                pilotEntryVortexLocal.y + dy * eased,
+                pilotEntryVortexLocal.z + Math.sin(spinAngle) * r
+              );
+
+              const chaos = (1 - eased) * 6;
+              u.spin.set(
+                (Math.random() - 0.5) * chaos,
+                (Math.random() - 0.5) * chaos,
+                (Math.random() - 0.5) * chaos
+              );
+              tumbleDelta.setFromEuler(tumbleEuler.set(u.spin.x * dt, u.spin.y * dt, u.spin.z * dt));
+              u.tiltQuat.multiply(tumbleDelta).normalize();
+              p.quaternion.copy(camera.quaternion).multiply(u.tiltQuat);
+              return;
+            }
 
             // Check collision with ship
             const dist = p.position.distanceTo(localShipPos);
