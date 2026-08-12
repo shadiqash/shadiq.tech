@@ -547,135 +547,6 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     // triggers it, at any spawn distance, for any length of time.
     let hasThrustedSinceEntry = false;
 
-    /* Value noise + fBm, used to paint every planet's surface procedurally.
-       Textures are generated rather than fetched so the whole thing stays a
-       single self-contained bundle with no image requests. */
-    function hash2(x, y) {
-      const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
-      return n - Math.floor(n);
-    }
-    function valueNoise(x, y) {
-      const xi = Math.floor(x);
-      const yi = Math.floor(y);
-      const xf = x - xi;
-      const yf = y - yi;
-      const u = xf * xf * (3 - 2 * xf);
-      const v = yf * yf * (3 - 2 * yf);
-      const a = hash2(xi, yi);
-      const b = hash2(xi + 1, yi);
-      const c = hash2(xi, yi + 1);
-      const d = hash2(xi + 1, yi + 1);
-      return a * (1 - u) * (1 - v) + b * u * (1 - v) + c * (1 - u) * v + d * u * v;
-    }
-    function fbm(x, y, octaves) {
-      let sum = 0;
-      let amp = 0.5;
-      let freq = 1;
-      for (let o = 0; o < octaves; o++) {
-        sum += valueNoise(x * freq, y * freq) * amp;
-        freq *= 2;
-        amp *= 0.5;
-      }
-      return sum;
-    }
-    function mixHex(a, b, t) {
-      const ar = (a >> 16) & 255;
-      const ag = (a >> 8) & 255;
-      const ab = a & 255;
-      const br = (b >> 16) & 255;
-      const bg = (b >> 8) & 255;
-      const bb = b & 255;
-      return `rgb(${Math.round(ar + (br - ar) * t)},${Math.round(ag + (bg - ag) * t)},${Math.round(ab + (bb - ab) * t)})`;
-    }
-
-    /* Equirectangular surface map. `bands` gives gas giants their latitudinal
-       jet streams (noise stretched hard in x); low `bands` gives rocky worlds
-       blotchy continents. Wrapping in x is handled by sampling noise on a
-       cylinder so the seam behind the planet doesn't show. */
-    function makePlanetTexture(def) {
-      const w = 256;
-      const h = 128;
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext("2d");
-      const img = ctx.createImageData(w, h);
-      const ramp = def.ramp;
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          const lon = (x / w) * Math.PI * 2;
-          // Sample on a cylinder so x wraps seamlessly around the sphere.
-          const nx = Math.cos(lon) * 2.2;
-          const nz = Math.sin(lon) * 2.2;
-          const ny = (y / h) * def.bands;
-          let n = fbm(nx + nz * 0.5, ny, 5);
-          if (def.bands > 4) n = n * 0.55 + Math.sin(ny * 2.5 + n * 3) * 0.22 + 0.28;
-          n = Math.max(0, Math.min(1, n));
-          // Poles run colder/brighter on every body — a cheap but convincing cue.
-          const lat = Math.abs(y / h - 0.5) * 2;
-          const polar = Math.max(0, lat - (def.iceCap ?? 0.78)) / 0.22;
-          const t = Math.max(0, Math.min(1, n));
-          const stops = ramp.length - 1;
-          const seg = Math.min(stops - 1, Math.floor(t * stops));
-          const local = t * stops - seg;
-          const rgb = mixHex(ramp[seg], ramp[seg + 1], local);
-          const m = /rgb\((\d+),(\d+),(\d+)\)/.exec(rgb);
-          let r = +m[1];
-          let g = +m[2];
-          let b = +m[3];
-          if (polar > 0) {
-            const p = Math.min(1, polar);
-            r += (238 - r) * p;
-            g += (245 - g) * p;
-            b += (255 - b) * p;
-          }
-          const i = (y * w + x) * 4;
-          img.data[i] = r;
-          img.data[i + 1] = g;
-          img.data[i + 2] = b;
-          img.data[i + 3] = 255;
-        }
-      }
-      ctx.putImageData(img, 0, 0);
-      const tex = new THREE.CanvasTexture(canvas);
-      tex.wrapS = THREE.RepeatWrapping;
-      tex.colorSpace = THREE.SRGBColorSpace;
-      return tex;
-    }
-
-    /* Saturn-style rings: concentric bands of varying brightness with real
-       gaps punched through the alpha channel, drawn into a 1px-tall strip
-       that the ring geometry samples radially. */
-    function makeRingTexture(color) {
-      const w = 256;
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = 1;
-      const ctx = canvas.getContext("2d");
-      const img = ctx.createImageData(w, 1);
-      const r = (color >> 16) & 255;
-      const g = (color >> 8) & 255;
-      const b = color & 255;
-      for (let x = 0; x < w; x++) {
-        const t = x / w;
-        let a = 0.55 + Math.sin(t * 42) * 0.2 + fbm(t * 18, 0, 3) * 0.35;
-        // Cassini-like divisions.
-        if (t < 0.12 || t > 0.97) a = 0;
-        if (t > 0.55 && t < 0.61) a *= 0.15;
-        if (t > 0.78 && t < 0.81) a *= 0.3;
-        const shade = 0.7 + fbm(t * 30, 5, 3) * 0.5;
-        const i = x * 4;
-        img.data[i] = Math.min(255, r * shade);
-        img.data[i + 1] = Math.min(255, g * shade);
-        img.data[i + 2] = Math.min(255, b * shade);
-        img.data[i + 3] = Math.max(0, Math.min(1, a)) * 255;
-      }
-      ctx.putImageData(img, 0, 0);
-      const tex = new THREE.CanvasTexture(canvas);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      return tex;
-    }
-
     // Radial falloff sprite, reused for the sun's corona and the nebulae.
     function makeGlowTexture(inner, outer) {
       const s = 128;
@@ -710,7 +581,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
 
     const sun = new THREE.Group();
     sun.visible = false;
-    sun.add(new THREE.Mesh(new THREE.SphereGeometry(1.1, 48, 32), new THREE.MeshBasicMaterial({ color: 0xfff6e2 })));
+    sun.add(new THREE.Mesh(new THREE.SphereGeometry(2.6, 48, 32), new THREE.MeshBasicMaterial({ color: 0xfff6e2 })));
     // Two glow shells: a tight photosphere bloom over a broad, faint corona,
     // which reads far more like a star than one big soft disc.
     const coronaInner = new THREE.Sprite(
@@ -722,7 +593,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         fog: false,
       })
     );
-    coronaInner.scale.setScalar(3.6);
+    coronaInner.scale.setScalar(7.5);
     sun.add(coronaInner);
     const coronaOuter = new THREE.Sprite(
       new THREE.SpriteMaterial({
@@ -734,27 +605,39 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         fog: false,
       })
     );
-    coronaOuter.scale.setScalar(8.5);
+    coronaOuter.scale.setScalar(17);
     sun.add(coronaOuter);
     scene.add(sun);
 
+    // Real photographic textures (Solar System Scope, CC BY 4.0 — see
+    // public/textures/planets/CREDITS.txt) instead of procedural noise —
+    // named bodies get to actually look like themselves. Radii are tuned
+    // for how imposing they feel next to the tiny ship, not literal
+    // astronomical scale (that would make Mercury an invisible speck and
+    // Neptune half a light-year away).
+    const PLANET_TEXTURE_BASE = "/textures/planets/";
+    const PLANET_BODIES = {
+      mercury: { file: "mercury.jpg", radius: 0.7, kind: "rocky" },
+      venus: { file: "venus.jpg", radius: 1.5, kind: "rocky" },
+      mars: { file: "mars.jpg", radius: 0.9, kind: "rocky" },
+      earth: { file: "earth.jpg", radius: 1.7, kind: "rocky", clouds: "earth_clouds.jpg" },
+      jupiter: { file: "jupiter.jpg", radius: 3.8, kind: "giant" },
+      saturn: { file: "saturn.jpg", radius: 3.3, kind: "giant", ring: "saturn_ring.png", ringTint: 0xd8c39a },
+      uranus: { file: "uranus.jpg", radius: 2.0, kind: "giant" },
+      neptune: { file: "neptune.jpg", radius: 1.9, kind: "giant" },
+    };
     const PLANET_DEFS = [
       // Scorched inner rock.
-      { radius: 0.42, orbitRadius: 4.5, speed: 0.35, tilt: 0.35, axial: 0.04, bands: 2.5,
-        ramp: [0x2b1a12, 0x6b3a22, 0xb06a38, 0xe0a05c], iceCap: 1.1 },
-      // Rusty desert world.
-      { radius: 0.34, orbitRadius: 6.4, speed: 0.26, tilt: -0.55, axial: 0.42, bands: 3,
-        ramp: [0x4a1f14, 0x8c3d22, 0xc2683a, 0xe6a173], iceCap: 0.86 },
-      // Earthlike: oceans, coasts, landmass, cloud deck on a separate shell.
-      { radius: 0.52, orbitRadius: 8.6, speed: 0.19, tilt: 0.25, axial: 0.41, bands: 2,
-        ramp: [0x0a2c52, 0x11467a, 0xc2ab72, 0x2f6b34, 0x8fa36a], iceCap: 0.8, clouds: true },
-      // Banded gas giant with a ring system.
-      { radius: 0.95, orbitRadius: 11.5, speed: 0.13, tilt: -0.3, axial: 0.47, bands: 9,
-        ramp: [0x6b4a2a, 0xa8783f, 0xd9b071, 0xf0dcb0], iceCap: 1.1, ring: 0xd8c39a },
+      { body: "mercury", orbitRadius: 6.5, speed: 0.32, tilt: 0.35, axial: 0.04 },
+      // Cloud-choked hothouse.
+      { body: "venus", orbitRadius: 10, speed: 0.24, tilt: -0.55, axial: 0.42 },
+      // Oceans, coasts, a cloud deck on a separate shell.
+      { body: "earth", orbitRadius: 14.5, speed: 0.18, tilt: 0.25, axial: 0.41 },
+      // Ringed gas giant.
+      { body: "saturn", orbitRadius: 21, speed: 0.11, tilt: -0.3, axial: 0.47 },
       // Cold ice giant on the outer edge.
-      { radius: 0.6, orbitRadius: 14.5, speed: 0.09, tilt: 0.5, axial: 1.7, bands: 6,
-        ramp: [0x123c5e, 0x1e6c96, 0x4aa3c4, 0x9fd6e6], iceCap: 0.9 },
-    ];
+      { body: "neptune", orbitRadius: 30, speed: 0.07, tilt: 0.5, axial: 1.7 },
+    ].map((d) => ({ ...d, ...PLANET_BODIES[d.body] }));
     function createPlanet(def) {
       const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(def.radius, 40, 28),
@@ -763,8 +646,13 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
       mesh.visible = false;
       mesh.rotation.z = def.axial;
 
+      // def.ring / def.clouds are texture filenames — captured here before
+      // the return below shadows those keys with the actual mesh objects.
+      const ringFile = def.ring ?? null;
+      const cloudsFile = def.clouds ?? null;
+
       let ring = null;
-      if (def.ring) {
+      if (ringFile) {
         // A flat annulus (not a torus) is what actually reads as a ring plane,
         // and its UVs let the banded texture run radially.
         const ringGeo = new THREE.RingGeometry(def.radius * 1.5, def.radius * 2.6, 96, 1);
@@ -779,14 +667,14 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         }
         ring = new THREE.Mesh(
           ringGeo,
-          new THREE.MeshBasicMaterial({ transparent: true, side: THREE.DoubleSide, depthWrite: false })
+          new THREE.MeshBasicMaterial({ color: def.ringTint ?? 0xffffff, transparent: true, side: THREE.DoubleSide, depthWrite: false })
         );
         ring.rotation.x = Math.PI / 2;
         mesh.add(ring);
       }
 
       let clouds = null;
-      if (def.clouds) {
+      if (cloudsFile) {
         clouds = new THREE.Mesh(
           new THREE.SphereGeometry(def.radius * 1.02, 32, 20),
           new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.42, roughness: 1, depthWrite: false })
@@ -795,7 +683,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
       }
 
       scene.add(mesh);
-      return { ...def, mesh, ring, ringColor: def.ring ?? null, clouds, angle: Math.random() * Math.PI * 2, spin: 0.25 + Math.random() * 0.4 };
+      return { ...def, mesh, ring, ringFile, clouds, cloudsFile, angle: Math.random() * Math.PI * 2, spin: 0.25 + Math.random() * 0.4 };
     }
     const planets = PLANET_DEFS.map(createPlanet);
 
@@ -806,63 +694,67 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
        that fall well behind the ship are disposed again — an unbounded
        planet count would eventually be an unbounded leak, so what's actually
        infinite is the *range*, not the live object count. */
-    const RING_RAMPS = [
-      [0x6b4a2a, 0xa8783f, 0xd9b071, 0xf0dcb0],
-      [0x123c5e, 0x1e6c96, 0x4aa3c4, 0x9fd6e6],
-      [0x5a2e4a, 0x8a4a70, 0xc07aa0, 0xe8b8d0],
-    ];
-    const ROCKY_RAMPS = [
-      [0x2b1a12, 0x6b3a22, 0xb06a38, 0xe0a05c],
-      [0x4a1f14, 0x8c3d22, 0xc2683a, 0xe6a173],
-      [0x0a2c52, 0x11467a, 0xc2ab72, 0x2f6b34, 0x8fa36a],
-      [0x3a2a1a, 0x5a4530, 0x7a6550, 0x9a8570],
-    ];
+    // Procedurally generated planets reuse this same real-body pool rather
+    // than inventing new ones — a real photo of Mars seen twice still looks
+    // like Mars, which reads far better than another blunt noise texture.
+    const ROCKY_BODIES = ["mercury", "venus", "mars", "earth"];
+    const GIANT_BODIES = ["jupiter", "saturn", "uranus", "neptune"];
     function randomPlanetDef(orbitRadius) {
       // Further out reads colder and more gas-giant-heavy, the same
       // progression the hand-authored five already follow.
       const chill = Math.min(1, orbitRadius / 60);
       const isGasGiant = Math.random() < 0.22 + chill * 0.35;
-      const ramps = isGasGiant ? RING_RAMPS : ROCKY_RAMPS;
-      const ramp = ramps[(Math.random() * ramps.length) | 0];
+      const pool = isGasGiant ? GIANT_BODIES : ROCKY_BODIES;
+      const body = pool[(Math.random() * pool.length) | 0];
+      const base = PLANET_BODIES[body];
+      // A little size variance per instance so repeats of the same body
+      // don't look like exact clones stamped along the orbit.
+      const scale = 0.75 + Math.random() * 0.5;
       return {
-        radius: isGasGiant ? 0.7 + Math.random() * 0.6 : 0.25 + Math.random() * 0.35,
+        body,
+        file: base.file,
+        radius: base.radius * scale,
         orbitRadius,
         // Real Kepler orbits slow down with distance — this just apes the shape of that.
         speed: 0.42 / Math.sqrt(orbitRadius / 4.5),
         tilt: (Math.random() - 0.5) * 1.2,
         axial: Math.random() * Math.PI * 0.5,
-        bands: isGasGiant ? 6 + Math.random() * 5 : 1.5 + Math.random() * 2.5,
-        ramp,
-        iceCap: 0.7 + Math.random() * 0.4,
-        ring: isGasGiant && Math.random() < 0.5 ? ramp[2] : undefined,
-        clouds: !isGasGiant && Math.random() < 0.3,
+        // Only Saturn's ring/tint and Earth's clouds are ever reused —
+        // other bodies just aren't textured for it.
+        ring: base.ring,
+        ringTint: base.ringTint,
+        clouds: base.clouds,
       };
     }
     // Orbit radius of the next procedurally-generated planet, and the gap
     // this run of the sliding window started from — both reset every fresh
     // dive so the area right around arrival looks the same each time.
     let nextOrbitRadius = 0;
-    const PLANET_AHEAD_BUFFER = 18; // generate once the ship is this close to the edge
-    const PLANET_BEHIND_BUFFER = 34; // dispose once this far behind the ship
-    const PLANET_GAP_BASE = 3.4;
-    const PLANET_GAP_GROWTH = 0.05; // gaps widen slowly so distant travel still feels vast, not tedious
+    const PLANET_AHEAD_BUFFER = 26; // generate once the ship is this close to the edge
+    const PLANET_BEHIND_BUFFER = 45; // dispose once this far behind the ship
+    const PLANET_GAP_BASE = 6; // wider than the hand-authored gaps — these planets can be as big as Jupiter
+    const PLANET_GAP_GROWTH = 0.15; // gaps widen slowly so distant travel still feels vast, not tedious
+    // Textures are shared/cached by filename (see loadPlanetTexture) since
+    // procedurally generated planets reuse this same small set of real
+    // bodies — disposing a planet must never dispose its texture, only its
+    // own geometry and material, or it would blank out every other live
+    // planet reusing that same image.
+    function disposePlanet(p) {
+      scene.remove(p.mesh);
+      p.mesh.geometry.dispose();
+      p.mesh.material.dispose();
+      if (p.ring) {
+        p.ring.geometry.dispose();
+        p.ring.material.dispose();
+      }
+      if (p.clouds) {
+        p.clouds.geometry.dispose();
+        p.clouds.material.dispose();
+      }
+    }
     function resetProceduralPlanets() {
       for (let i = planets.length - 1; i >= PLANET_DEFS.length; i--) {
-        const p = planets[i];
-        scene.remove(p.mesh);
-        p.mesh.geometry.dispose();
-        p.mesh.material.map?.dispose();
-        p.mesh.material.dispose();
-        if (p.ring) {
-          p.ring.geometry.dispose();
-          p.ring.material.map?.dispose();
-          p.ring.material.dispose();
-        }
-        if (p.clouds) {
-          p.clouds.geometry.dispose();
-          p.clouds.material.alphaMap?.dispose();
-          p.clouds.material.dispose();
-        }
+        disposePlanet(planets[i]);
         planets.splice(i, 1);
       }
       nextOrbitRadius = PLANET_DEFS[PLANET_DEFS.length - 1].orbitRadius + PLANET_GAP_BASE;
@@ -880,20 +772,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
       for (let i = planets.length - 1; i >= PLANET_DEFS.length; i--) {
         const p = planets[i];
         if (p.orbitRadius >= shipDist - PLANET_BEHIND_BUFFER) continue;
-        scene.remove(p.mesh);
-        p.mesh.geometry.dispose();
-        p.mesh.material.map?.dispose();
-        p.mesh.material.dispose();
-        if (p.ring) {
-          p.ring.geometry.dispose();
-          p.ring.material.map?.dispose();
-          p.ring.material.dispose();
-        }
-        if (p.clouds) {
-          p.clouds.geometry.dispose();
-          p.clouds.material.alphaMap?.dispose();
-          p.clouds.material.dispose();
-        }
+        disposePlanet(p);
         planets.splice(i, 1);
       }
       // Comfortably past the furthest live planet — never right at the
@@ -1019,21 +898,33 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
       return sprite;
     });
 
-    /* Surface textures cost a few hundred thousand noise samples to generate,
-       which is pure waste for the vast majority of visitors who never fly
-       into the core. Built once per planet, lazily — the first five on the
-       first warp, and every planet added after that as it's created. */
+    /* Real image downloads, which is pure waste for the vast majority of
+       visitors who never fly into the core. Built once per planet, lazily —
+       the first five on the first warp, and every planet added after that
+       as it's created. Textures are cached by filename since procedurally
+       generated planets reuse this same small set of real bodies. */
+    const textureLoader = new THREE.TextureLoader();
+    const planetTextureCache = new Map();
+    function loadPlanetTexture(file) {
+      if (planetTextureCache.has(file)) return planetTextureCache.get(file);
+      const tex = textureLoader.load(PLANET_TEXTURE_BASE + file);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      planetTextureCache.set(file, tex);
+      return tex;
+    }
     function buildPlanetTexture(p) {
-      p.mesh.material.map = makePlanetTexture(p);
+      p.mesh.material.map = loadPlanetTexture(p.file);
       p.mesh.material.needsUpdate = true;
-      if (p.ring) {
-        p.ring.material.map = makeRingTexture(p.ringColor);
+      if (p.ring && p.ringFile) {
+        // The ring image is a grayscale alpha/brightness map, not a full
+        // color photo — a flat white map with only its alpha channel would
+        // wash out, so it's used as the alpha and tinted by material.color
+        // (set in createPlanet) instead of driving color directly.
+        p.ring.material.alphaMap = loadPlanetTexture(p.ringFile);
         p.ring.material.needsUpdate = true;
       }
-      if (p.clouds) {
-        const tex = makePlanetTexture({ bands: 3.5, ramp: [0x000000, 0x000000, 0xffffff, 0xffffff], iceCap: 1.1 });
-        p.clouds.material.alphaMap = tex;
-        p.clouds.material.transparent = true;
+      if (p.clouds && p.cloudsFile) {
+        p.clouds.material.alphaMap = loadPlanetTexture(p.cloudsFile);
         p.clouds.material.needsUpdate = true;
       }
     }
@@ -2018,21 +1909,11 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           m.material.map?.dispose();
           m.material.dispose();
         });
-        planets.forEach((p) => {
-          p.mesh.geometry.dispose();
-          p.mesh.material.map?.dispose();
-          p.mesh.material.dispose();
-          if (p.ring) {
-            p.ring.geometry.dispose();
-            p.ring.material.map?.dispose();
-            p.ring.material.dispose();
-          }
-          if (p.clouds) {
-            p.clouds.geometry.dispose();
-            p.clouds.material.alphaMap?.dispose();
-            p.clouds.material.dispose();
-          }
-        });
+        planets.forEach(disposePlanet);
+        // Cached real textures are shared across planets by filename, so
+        // each one is only disposed once here rather than per-mesh above.
+        planetTextureCache.forEach((tex) => tex.dispose());
+        planetTextureCache.clear();
         starGeo.dispose();
         starMaterial.dispose();
         nebulae.forEach((n) => n.material.dispose());
