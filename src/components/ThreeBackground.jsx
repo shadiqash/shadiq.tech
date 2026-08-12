@@ -755,7 +755,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
       { radius: 0.6, orbitRadius: 14.5, speed: 0.09, tilt: 0.5, axial: 1.7, bands: 6,
         ramp: [0x123c5e, 0x1e6c96, 0x4aa3c4, 0x9fd6e6], iceCap: 0.9 },
     ];
-    const planets = PLANET_DEFS.map((def) => {
+    function createPlanet(def) {
       const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(def.radius, 40, 28),
         new THREE.MeshStandardMaterial({ roughness: 0.92, metalness: 0.02 })
@@ -796,11 +796,118 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
 
       scene.add(mesh);
       return { ...def, mesh, ring, ringColor: def.ring ?? null, clouds, angle: Math.random() * Math.PI * 2, spin: 0.25 + Math.random() * 0.4 };
-    });
+    }
+    const planets = PLANET_DEFS.map(createPlanet);
+
+    /* Beyond the hand-authored five, the system keeps going forever: as the
+       ship gets close to the outermost generated orbit, a few more planets
+       are rolled up procedurally further out, loosely following real orbital
+       mechanics (slower, colder, more gas giants with distance). Planets
+       that fall well behind the ship are disposed again — an unbounded
+       planet count would eventually be an unbounded leak, so what's actually
+       infinite is the *range*, not the live object count. */
+    const RING_RAMPS = [
+      [0x6b4a2a, 0xa8783f, 0xd9b071, 0xf0dcb0],
+      [0x123c5e, 0x1e6c96, 0x4aa3c4, 0x9fd6e6],
+      [0x5a2e4a, 0x8a4a70, 0xc07aa0, 0xe8b8d0],
+    ];
+    const ROCKY_RAMPS = [
+      [0x2b1a12, 0x6b3a22, 0xb06a38, 0xe0a05c],
+      [0x4a1f14, 0x8c3d22, 0xc2683a, 0xe6a173],
+      [0x0a2c52, 0x11467a, 0xc2ab72, 0x2f6b34, 0x8fa36a],
+      [0x3a2a1a, 0x5a4530, 0x7a6550, 0x9a8570],
+    ];
+    function randomPlanetDef(orbitRadius) {
+      // Further out reads colder and more gas-giant-heavy, the same
+      // progression the hand-authored five already follow.
+      const chill = Math.min(1, orbitRadius / 60);
+      const isGasGiant = Math.random() < 0.22 + chill * 0.35;
+      const ramps = isGasGiant ? RING_RAMPS : ROCKY_RAMPS;
+      const ramp = ramps[(Math.random() * ramps.length) | 0];
+      return {
+        radius: isGasGiant ? 0.7 + Math.random() * 0.6 : 0.25 + Math.random() * 0.35,
+        orbitRadius,
+        // Real Kepler orbits slow down with distance — this just apes the shape of that.
+        speed: 0.42 / Math.sqrt(orbitRadius / 4.5),
+        tilt: (Math.random() - 0.5) * 1.2,
+        axial: Math.random() * Math.PI * 0.5,
+        bands: isGasGiant ? 6 + Math.random() * 5 : 1.5 + Math.random() * 2.5,
+        ramp,
+        iceCap: 0.7 + Math.random() * 0.4,
+        ring: isGasGiant && Math.random() < 0.5 ? ramp[2] : undefined,
+        clouds: !isGasGiant && Math.random() < 0.3,
+      };
+    }
+    // Orbit radius of the next procedurally-generated planet, and the gap
+    // this run of the sliding window started from — both reset every fresh
+    // dive so the area right around arrival looks the same each time.
+    let nextOrbitRadius = 0;
+    const PLANET_AHEAD_BUFFER = 18; // generate once the ship is this close to the edge
+    const PLANET_BEHIND_BUFFER = 34; // dispose once this far behind the ship
+    const PLANET_GAP_BASE = 3.4;
+    const PLANET_GAP_GROWTH = 0.05; // gaps widen slowly so distant travel still feels vast, not tedious
+    function resetProceduralPlanets() {
+      for (let i = planets.length - 1; i >= PLANET_DEFS.length; i--) {
+        const p = planets[i];
+        scene.remove(p.mesh);
+        p.mesh.geometry.dispose();
+        p.mesh.material.map?.dispose();
+        p.mesh.material.dispose();
+        if (p.ring) {
+          p.ring.geometry.dispose();
+          p.ring.material.map?.dispose();
+          p.ring.material.dispose();
+        }
+        if (p.clouds) {
+          p.clouds.geometry.dispose();
+          p.clouds.material.alphaMap?.dispose();
+          p.clouds.material.dispose();
+        }
+        planets.splice(i, 1);
+      }
+      nextOrbitRadius = PLANET_DEFS[PLANET_DEFS.length - 1].orbitRadius + PLANET_GAP_BASE;
+    }
+    function extendPlanetsToward(shipDist) {
+      let guard = 0;
+      while (nextOrbitRadius - shipDist < PLANET_AHEAD_BUFFER && guard++ < 4) {
+        const p = createPlanet(randomPlanetDef(nextOrbitRadius));
+        buildPlanetTexture(p);
+        p.mesh.visible = true;
+        planets.push(p);
+        const gapIndex = planets.length - PLANET_DEFS.length;
+        nextOrbitRadius += PLANET_GAP_BASE + gapIndex * PLANET_GAP_GROWTH;
+      }
+      for (let i = planets.length - 1; i >= PLANET_DEFS.length; i--) {
+        const p = planets[i];
+        if (p.orbitRadius >= shipDist - PLANET_BEHIND_BUFFER) continue;
+        scene.remove(p.mesh);
+        p.mesh.geometry.dispose();
+        p.mesh.material.map?.dispose();
+        p.mesh.material.dispose();
+        if (p.ring) {
+          p.ring.geometry.dispose();
+          p.ring.material.map?.dispose();
+          p.ring.material.dispose();
+        }
+        if (p.clouds) {
+          p.clouds.geometry.dispose();
+          p.clouds.material.alphaMap?.dispose();
+          p.clouds.material.dispose();
+        }
+        planets.splice(i, 1);
+      }
+      // Comfortably past the furthest live planet — never right at the
+      // camera's own far plane, where distant geometry starts flickering.
+      const desiredFar = Math.max(260, nextOrbitRadius + 40);
+      if (camera.far < desiredFar) {
+        camera.far = desiredFar;
+        camera.updateProjectionMatrix();
+      }
+    }
 
     /* Distant stars. They're parented to nothing and re-centred on the camera
-       every frame, so they never parallax and never leave the 100-unit far
-       plane — which is exactly how genuinely distant stars behave. Per-vertex
+       every frame, so they never parallax and always stay well inside the
+       far plane — which is exactly how genuinely distant stars behave. Per-vertex
        size and colour temperature come through a tiny shader so the field has
        real magnitude variation instead of uniform dots. */
     const STAR_COUNT = isSmallScreen ? 2600 : 5200;
@@ -914,25 +1021,27 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
 
     /* Surface textures cost a few hundred thousand noise samples to generate,
        which is pure waste for the vast majority of visitors who never fly
-       into the core. Built once, lazily, on the first warp. */
+       into the core. Built once per planet, lazily — the first five on the
+       first warp, and every planet added after that as it's created. */
+    function buildPlanetTexture(p) {
+      p.mesh.material.map = makePlanetTexture(p);
+      p.mesh.material.needsUpdate = true;
+      if (p.ring) {
+        p.ring.material.map = makeRingTexture(p.ringColor);
+        p.ring.material.needsUpdate = true;
+      }
+      if (p.clouds) {
+        const tex = makePlanetTexture({ bands: 3.5, ramp: [0x000000, 0x000000, 0xffffff, 0xffffff], iceCap: 1.1 });
+        p.clouds.material.alphaMap = tex;
+        p.clouds.material.transparent = true;
+        p.clouds.material.needsUpdate = true;
+      }
+    }
     let solarTexturesBuilt = false;
     function buildSolarTextures() {
       if (solarTexturesBuilt) return;
       solarTexturesBuilt = true;
-      planets.forEach((p) => {
-        p.mesh.material.map = makePlanetTexture(p);
-        p.mesh.material.needsUpdate = true;
-        if (p.ring) {
-          p.ring.material.map = makeRingTexture(p.ringColor);
-          p.ring.material.needsUpdate = true;
-        }
-        if (p.clouds) {
-          const tex = makePlanetTexture({ bands: 3.5, ramp: [0x000000, 0x000000, 0xffffff, 0xffffff], iceCap: 1.1 });
-          p.clouds.material.alphaMap = tex;
-          p.clouds.material.transparent = true;
-          p.clouds.material.needsUpdate = true;
-        }
-      });
+      planets.forEach(buildPlanetTexture);
     }
 
     const portal = new THREE.Mesh(
@@ -1498,6 +1607,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
             captured = false;
             flashOpacity = 1;
             buildSolarTextures();
+            resetProceduralPlanets();
             blob.visible = false;
             strokes.forEach((s) => (s.visible = false));
             particles.visible = false;
@@ -1529,6 +1639,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
             scene.fog.density = 0.006;
           }
         } else {
+          extendPlanetsToward(ship.pos.length());
           planets.forEach((p) => {
             p.angle += dt * p.speed;
             // Each orbit sits on its own slightly inclined plane, so the
@@ -1569,6 +1680,10 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
             ship.pitch = 0;
             scene.fog.color.setHex(0x0b0b0a);
             scene.fog.density = 0.05;
+            // Back to the normal-space far plane — no need to keep the
+            // depth buffer stretched out over a solar system nobody's in.
+            camera.far = 100;
+            camera.updateProjectionMatrix();
           }
         }
         // Genuinely distant stars show no parallax, so the field rides along
@@ -1787,6 +1902,8 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           inSolarSystem = false;
           scene.fog.color.setHex(0x0b0b0a);
           scene.fog.density = 0.05;
+          camera.far = 100;
+          camera.updateProjectionMatrix();
         }
         diveProgress = 0;
         captured = false;
