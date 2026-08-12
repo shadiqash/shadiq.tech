@@ -31,7 +31,7 @@ function isWebGLAvailable() {
   }
 }
 
-export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, triggerRef, pilotMode, onDock, onSecretFound }) {
+export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailable, activity, triggerRef, pilotMode, onSecretFound, contentRef }) {
   const mountRef = useRef(null);
   const shockwaveRef = useRef({ time: 100, x: 0, y: 0, active: false });
   const scrollVelocity = useRef(0);
@@ -57,14 +57,29 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     let cancelled = false;
     let cleanup = () => {};
 
-    import("three").then((THREE) => {
+    import("three").then(async (THREE) => {
       if (cancelled) return;
 
       let width = mount.clientWidth;
       let height = mount.clientHeight;
 
+      const { CSS3DRenderer, CSS3DObject } = await import("three/examples/jsm/renderers/CSS3DRenderer.js");
+      if (cancelled) return;
+
       const scene = new THREE.Scene();
     scene.fog = new THREE.FogExp2(0x0b0b0a, 0.05);
+
+    // A parallel scene for the page's own sections, rendered by a separate
+    // DOM-based renderer (below) so pilot mode can fly through real, styled
+    // content — the actual site, not a stand-in mesh — rather than compositing
+    // it into the WebGL scene.
+    const cssScene = new THREE.Scene();
+
+    // The sections live on a single rotating body, the same idea as the
+    // ink blob — one entity you orbit and see every face of, not a strip
+    // of panels bolted in a line.
+    const contentGroup = new THREE.Group();
+    cssScene.add(contentGroup);
 
     const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 100);
     camera.position.set(0, 0, 9);
@@ -88,6 +103,15 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     mount.appendChild(renderer.domElement);
+
+    const cssRenderer = new CSS3DRenderer();
+    cssRenderer.setSize(width, height);
+    cssRenderer.domElement.style.position = "absolute";
+    cssRenderer.domElement.style.top = "0";
+    cssRenderer.domElement.style.left = "0";
+    cssRenderer.domElement.style.pointerEvents = "none";
+    mount.appendChild(cssRenderer.domElement);
+    let contentPanels = [];
 
     // Manual post-processing pass (no examples/jsm dependency): render the
     // scene to a target, then composite through a single shader doing a
@@ -335,6 +359,10 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     const SHIP_DRAG_PER_SEC = 0.4;
     const STEER_RATE = 2.6; // radians/sec at full mouse deflection (position-based fallback only)
     const MOUSE_SENSITIVITY = 0.0026; // radians per pixel of raw mouse movement (pointer-lock steering)
+    // Close to straight up/down (just short of the pole, to keep "forward"
+    // well-defined) — thrust is always along where the nose is pointed, so
+    // aiming the nose up and holding thrust is itself the climb control.
+    const PITCH_LIMIT = 1.55;
     const ship = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), yaw: 0, pitch: 0, throttle: 0 };
     let wasPiloting = false;
     camera.rotation.order = "YXZ";
@@ -441,9 +469,10 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     });
 
     // --- navigation beacons: one per nav section, spread around the scene.
-    // Flying close enough "docks" — exits pilot mode and jumps you there.
-    // This is the actual point of pilot mode, not just a flight-sim toy.
+    // Purely physical markers — flying close bounces the ship off rather
+    // than jumping to that section, same as any other obstacle out here.
     const DOCK_RADIUS = 1.0;
+    const BEACON_BOUNCE_FORCE = 22.0;
     const beacons = NAV_LINKS.map((link, i) => {
       const angle = (i / NAV_LINKS.length) * Math.PI * 2;
       const pos = new THREE.Vector3(Math.cos(angle) * 9, Math.sin(angle * 1.7) * 3.2, Math.sin(angle) * 9 - 1);
@@ -985,6 +1014,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
+      cssRenderer.setSize(width, height);
       renderTarget.setSize(width, height);
       postMaterial.uniforms.uResolution.value.set(width, height);
     }
@@ -1227,6 +1257,129 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           ship.pitch = camera.rotation.x;
           camera.rotation.z = 0;
           hasThrustedSinceEntry = false;
+
+          // Not a page hanging in space, and not even whole words — every
+          // single character is its own bare fragment, entirely detached
+          // from the DOM it came from beyond borrowing its font and color.
+          if (contentRef?.current) {
+            const FRAGMENT_SELECTOR =
+              "h1, h2, h3, p, li, .eyebrow, .section-num, .display, " +
+              ".project-tagline, .tag, .skill-chip, .strip-label, " +
+              ".now-tag, .open-to, .k, .v";
+            let fragments = Array.from(contentRef.current.querySelectorAll(FRAGMENT_SELECTOR));
+            // Drop anything nested inside another match (e.g. a heading
+            // inside a matched paragraph's ancestor) so text isn't doubled.
+            fragments = fragments.filter(
+              (el, _, arr) => !arr.some((other) => other !== el && other.contains(el))
+            );
+            fragments = fragments.filter((el) => el.textContent.trim().length > 0);
+            // Only what's actually on screen right now — anything below the
+            // fold has no real on-screen rect to start from, and clamping
+            // all of it to the frame edge piled dozens of unrelated
+            // fragments on top of each other in an unreadable heap. This
+            // way "float where it is" only ever means somewhere the pilot
+            // was just looking, which is also what keeps the whole wall
+            // readably in front of the ship instead of smeared to one side.
+            fragments = fragments.filter((el) => {
+              const r = el.getBoundingClientRect();
+              return r.bottom > 0 && r.top < window.innerHeight && r.right > 0 && r.left < window.innerWidth;
+            }).slice(0, 70);
+
+            // Each fragment element is broken down into its individual
+            // characters — not linked to the page at all beyond borrowing
+            // its font/color and its exact on-screen position a moment ago.
+            // Measured before the real DOM is hidden (opacity doesn't
+            // affect layout, but the Range rects need the text still
+            // actually laid out to measure against).
+            const MAX_CHAR_FRAGMENTS = 220;
+            const charFragments = [];
+            charScan: for (const el of fragments) {
+              const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+              let textNode;
+              while ((textNode = walker.nextNode())) {
+                const style = getComputedStyle(textNode.parentElement);
+                const text = textNode.textContent;
+                for (let i = 0; i < text.length; i++) {
+                  const ch = text[i];
+                  if (!ch.trim()) continue;
+                  const range = document.createRange();
+                  range.setStart(textNode, i);
+                  range.setEnd(textNode, i + 1);
+                  const rect = range.getBoundingClientRect();
+                  if (rect.width === 0 || rect.height === 0) continue;
+                  charFragments.push({ ch, rect, style });
+                  if (charFragments.length >= MAX_CHAR_FRAGMENTS) break charScan;
+                }
+              }
+            }
+
+            contentRef.current.style.opacity = "0";
+            contentRef.current.style.pointerEvents = "none";
+
+            contentPanels.forEach((p) => contentGroup.remove(p));
+            contentPanels = [];
+
+            const forward = new THREE.Vector3(0, 0, -1).applyEuler(
+              new THREE.Euler(ship.pitch, ship.yaw, 0, "YXZ")
+            );
+            contentGroup.position.copy(ship.pos).addScaledVector(forward, 26);
+            contentGroup.rotation.set(0, 0, 0);
+            contentGroup.updateMatrixWorld(true);
+
+            // Where each character starts: unproject its on-screen rect back
+            // into world space, the same spot it visually occupied a moment
+            // ago — exact, since every fragment here is already confirmed
+            // on screen (see the viewport filter above).
+            const LIFTOFF_DIST = 13;
+            function screenToLocalStart(rect) {
+              const ndcX = THREE.MathUtils.clamp(
+                ((rect.left + rect.width / 2) / window.innerWidth) * 2 - 1,
+                -1, 1
+              );
+              const ndcY = THREE.MathUtils.clamp(
+                -((rect.top + rect.height / 2) / window.innerHeight) * 2 + 1,
+                -1, 1
+              );
+              const vec = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(camera);
+              const dir = vec.sub(camera.position).normalize();
+              const world = camera.position.clone().addScaledVector(dir, LIFTOFF_DIST);
+              return contentGroup.worldToLocal(world);
+            }
+
+            const FRAGMENT_SCALE = 0.017;
+            charFragments.forEach(({ ch, rect, style }) => {
+              const span = document.createElement("span");
+              span.textContent = ch;
+              span.style.display = "inline-block";
+              span.style.whiteSpace = "pre";
+              span.style.fontFamily = style.fontFamily;
+              span.style.fontSize = style.fontSize;
+              span.style.fontWeight = style.fontWeight;
+              span.style.fontStyle = style.fontStyle;
+              span.style.letterSpacing = style.letterSpacing;
+              span.style.color = style.color;
+              span.style.pointerEvents = "none";
+              span.style.textShadow = "0 0 14px rgba(11,11,10,0.9)";
+              span.style.opacity = "0.94";
+              span.style.backfaceVisibility = "hidden";
+              span.style.webkitBackfaceVisibility = "hidden";
+
+              const frag = new CSS3DObject(span);
+              frag.scale.setScalar(FRAGMENT_SCALE);
+
+              frag.position.copy(screenToLocalStart(rect));
+              frag.quaternion.copy(camera.quaternion);
+
+              frag.userData.velocity = new THREE.Vector3(0, 0, 0);
+              frag.userData.spin = new THREE.Vector3(
+                (Math.random() - 0.5) * 0.16,
+                (Math.random() - 0.5) * 0.16,
+                (Math.random() - 0.5) * 0.16
+              );
+              contentGroup.add(frag);
+              contentPanels.push(frag);
+            });
+          }
         }
 
         if (document.pointerLockElement || touchMode) {
@@ -1235,7 +1388,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           // for "the controls are hard" — the old scheme required holding
           // the mouse at the exact center of the screen to fly straight.
           ship.yaw -= mouseDelta.x * MOUSE_SENSITIVITY;
-          ship.pitch = THREE.MathUtils.clamp(ship.pitch - mouseDelta.y * MOUSE_SENSITIVITY, -1.3, 1.3);
+          ship.pitch = THREE.MathUtils.clamp(ship.pitch - mouseDelta.y * MOUSE_SENSITIVITY, -PITCH_LIMIT, PITCH_LIMIT);
           // Only clear the buffer once it's actually been applied — there's
           // an inherent one-frame gap between requesting pointer lock and it
           // engaging, and clearing unconditionally on every frame (including
@@ -1247,7 +1400,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           // Fallback if pointer lock is unavailable/denied: the older
           // position-relative-to-center scheme, worse but functional.
           ship.yaw -= pointer.x * STEER_RATE * dt;
-          ship.pitch = THREE.MathUtils.clamp(ship.pitch + pointer.y * STEER_RATE * 0.65 * dt, -1.3, 1.3);
+          ship.pitch = THREE.MathUtils.clamp(ship.pitch + pointer.y * STEER_RATE * 0.65 * dt, -PITCH_LIMIT, PITCH_LIMIT);
         }
 
         const forward = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(ship.pitch, ship.yaw, 0, "YXZ"));
@@ -1323,6 +1476,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
             // The cursor trail dots park at the origin, which is exactly
             // where the sun sits — they'd read as a dark blot on its face.
             trailDots.forEach((d) => (d.visible = false));
+            contentPanels.forEach((p) => (p.visible = false));
             beacons.forEach((b) => (b.group.visible = false));
             secretBeacon.visible = false;
             sun.visible = true;
@@ -1380,6 +1534,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
             strokes.forEach((s) => (s.visible = true));
             particles.visible = true;
             trailDots.forEach((d) => (d.visible = true));
+            contentPanels.forEach((p) => (p.visible = true));
             ship.pos.set(0, 0, 6);
             ship.vel.set(0, 0, 0);
             ship.yaw = 0;
@@ -1462,13 +1617,17 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
               nearestLabel = b.label;
               nearestBeaconPos = b.group.position;
             }
-            if (dist < DOCK_RADIUS) onDock?.(b.id);
+            // Beacons are solid, not a teleport trigger: getting close
+            // bounces the ship off rather than jumping to that section.
+            if (dist < DOCK_RADIUS && dist > 0.0001) {
+              const pushDir = ship.pos.clone().sub(b.group.position).normalize();
+              const overlap = 1 - dist / DOCK_RADIUS;
+              ship.vel.addScaledVector(pushDir, overlap * BEACON_BOUNCE_FORCE * dt);
+              ship.pos.addScaledVector(pushDir, overlap * DOCK_RADIUS * 0.6 * dt);
+            }
           });
           if (nearestLabel && nearestBeaconPos) {
-            beaconText.textContent =
-              nearestDist < DOCK_RADIUS
-                ? `DOCKING — ${nearestLabel.toUpperCase()}`
-                : `${nearestLabel.toUpperCase()} — ${nearestDist.toFixed(1)}u`;
+            beaconText.textContent = `${nearestLabel.toUpperCase()} — ${nearestDist.toFixed(1)}u`;
             // Bearing to the beacon relative to the ship's own facing — 0 is
             // straight ahead, so the arrow always points the true way to turn.
             const toBeacon = nearestBeaconPos.clone().sub(ship.pos);
@@ -1482,6 +1641,41 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           } else {
             beaconLabel.style.opacity = "0";
           }
+
+          // Ship collision physics — a tight radius so individual
+          // characters bump out of the way on their own instead of a whole
+          // sentence flinching together.
+          const COLLISION_RADIUS = 1.1;
+          const REPULSION_FORCE = 18.0;
+          const localShipPos = contentGroup.worldToLocal(ship.pos.clone());
+
+          contentPanels.forEach((p) => {
+            const u = p.userData;
+            
+            // Check collision with ship
+            const dist = p.position.distanceTo(localShipPos);
+            if (dist < COLLISION_RADIUS) {
+              const pushDir = p.position.clone().sub(localShipPos).normalize();
+              const force = (1 - dist / COLLISION_RADIUS) * REPULSION_FORCE * dt;
+              u.velocity.add(pushDir.multiplyScalar(force));
+              
+              // Add a bit of chaotic spin when hit
+              u.spin.x += (Math.random() - 0.5) * force * 0.5;
+              u.spin.y += (Math.random() - 0.5) * force * 0.5;
+              u.spin.z += (Math.random() - 0.5) * force * 0.5;
+            }
+
+            // Apply velocity and drag
+            p.position.addScaledVector(u.velocity, dt);
+            dampVec3(u.velocity, new THREE.Vector3(0, 0, 0), 2.0, dt);
+            
+            // Apply spin drag
+            u.spin.lerp(new THREE.Vector3(0, 0, 0), 1 - Math.exp(-0.5 * dt));
+
+            p.rotateX(u.spin.x * dt);
+            p.rotateY(u.spin.y * dt);
+            p.rotateZ(u.spin.z * dt);
+          });
         } else {
           beaconLabel.style.opacity = "0";
         }
@@ -1498,6 +1692,15 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         secretBeacon.visible = false;
         secretDocked = false;
         warpFlash.style.opacity = "0";
+
+        // Hand the page back: drop the flown-through panels and reveal the
+        // real DOM again, wherever the user left off scrolling.
+        if (wasPiloting && contentRef?.current) {
+          contentRef.current.style.opacity = "1";
+          contentRef.current.style.pointerEvents = "";
+          contentPanels.forEach((p) => contentGroup.remove(p));
+          contentPanels = [];
+        }
 
         // Exiting mid-warp (Escape while inside the solar system) should
         // never leave the normal scene permanently hidden behind it.
@@ -1556,6 +1759,7 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
       renderer.setRenderTarget(null);
       postMaterial.uniforms.uTime.value = t;
       renderer.render(postScene, postCamera);
+      cssRenderer.render(cssScene, camera);
     }
       animate();
 
@@ -1575,6 +1779,14 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
         touchControls.remove();
         if (renderer.domElement.parentNode === mount) {
           mount.removeChild(renderer.domElement);
+        }
+        if (cssRenderer.domElement.parentNode === mount) {
+          mount.removeChild(cssRenderer.domElement);
+        }
+        contentPanels.forEach((p) => contentGroup.remove(p));
+        if (contentRef?.current) {
+          contentRef.current.style.opacity = "";
+          contentRef.current.style.pointerEvents = "";
         }
         if (beaconLabel.parentNode === mount) {
           mount.removeChild(beaconLabel);

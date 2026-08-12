@@ -40,6 +40,7 @@ export default function Portfolio3D() {
   const [pilotMode, setPilotMode] = useState(false);
   const [secretFound, setSecretFound] = useState(false);
   const shockwaveTriggerRef = useRef(null);
+  const contentRef = useRef(null);
   // Which flight controls to describe in the pilot hint. Read once — a
   // device doesn't grow a mouse mid-session, and matchMedia in render would
   // otherwise be re-evaluated on every state change.
@@ -165,7 +166,7 @@ export default function Portfolio3D() {
   return (
     <div className="page">
       <BootLoader />
-      {!pilotMode && <InkCursor />}
+      <InkCursor pilotMode={pilotMode} />
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
@@ -181,8 +182,8 @@ export default function Portfolio3D() {
         <div className="pilot-hud" aria-hidden="true">
           <div className="pilot-hint">
             {isTouch
-              ? "PILOT MODE — hold THRUST to fly · drag anywhere to steer · ▲▼ for up-down · fly into a glowing marker to dock · dive into the core for something else"
-              : "PILOT MODE — WASD / arrows to move · space / shift for up-down · mouse to steer · fly into a glowing marker to dock · dive into the core for something else · esc to exit"}
+              ? "PILOT MODE — hold THRUST to fly · drag anywhere to steer · ▲▼ for up-down · bump into markers and text · dive into the core for something else"
+              : "PILOT MODE — WASD / arrows to move · space / shift for up-down · mouse to steer · bump into markers and text · dive into the core for something else · esc to exit"}
           </div>
         </div>
       )}
@@ -195,16 +196,12 @@ export default function Portfolio3D() {
           activity={activity}
           triggerRef={shockwaveTriggerRef}
           pilotMode={pilotMode}
-          onDock={(id) => {
-            if (document.pointerLockElement) document.exitPointerLock();
-            setPilotMode(false);
-            scrollToSection(id);
-          }}
           onSecretFound={() => {
             if (document.pointerLockElement) document.exitPointerLock();
             setPilotMode(false);
             setSecretFound(true);
           }}
+          contentRef={contentRef}
         />
       ) : (
         <>
@@ -233,7 +230,7 @@ export default function Portfolio3D() {
         </div>
       )}
 
-      <div className="content">
+      <div className="content" ref={contentRef}>
         {/* Skip-to-content for keyboard/screen-reader users */}
         <a href="#work" className="sr-only">Skip to content</a>
 
