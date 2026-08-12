@@ -364,6 +364,10 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
     // aiming the nose up and holding thrust is itself the climb control.
     const PITCH_LIMIT = 1.55;
     const ship = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), yaw: 0, pitch: 0, throttle: 0 };
+    // Scratch objects reused every frame for the per-character tumble
+    // update below, instead of allocating one per character per frame.
+    const tumbleDeltaScratch = new THREE.Quaternion();
+    const tumbleEulerScratch = new THREE.Euler();
     let wasPiloting = false;
     camera.rotation.order = "YXZ";
 
@@ -1376,6 +1380,12 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
                 (Math.random() - 0.5) * 0.16,
                 (Math.random() - 0.5) * 0.16
               );
+              // Accumulated tumble from impacts, layered on top of the
+              // camera-facing billboard every frame below — the quaternion
+              // was only ever set once, here, so a character kept whatever
+              // angle it started at while the ship turned freely around it,
+              // reading as backwards or edge-on within a few seconds of flight.
+              frag.userData.tiltQuat = new THREE.Quaternion();
               contentGroup.add(frag);
               contentPanels.push(frag);
             });
@@ -1648,10 +1658,12 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
           const COLLISION_RADIUS = 1.1;
           const REPULSION_FORCE = 18.0;
           const localShipPos = contentGroup.worldToLocal(ship.pos.clone());
+          const tumbleDelta = tumbleDeltaScratch;
+          const tumbleEuler = tumbleEulerScratch;
 
           contentPanels.forEach((p) => {
             const u = p.userData;
-            
+
             // Check collision with ship
             const dist = p.position.distanceTo(localShipPos);
             if (dist < COLLISION_RADIUS) {
@@ -1668,13 +1680,17 @@ export default function ThreeBackground({ scrollRef, reducedMotion, onUnavailabl
             // Apply velocity and drag
             p.position.addScaledVector(u.velocity, dt);
             dampVec3(u.velocity, new THREE.Vector3(0, 0, 0), 2.0, dt);
-            
+
             // Apply spin drag
             u.spin.lerp(new THREE.Vector3(0, 0, 0), 1 - Math.exp(-0.5 * dt));
 
-            p.rotateX(u.spin.x * dt);
-            p.rotateY(u.spin.y * dt);
-            p.rotateZ(u.spin.z * dt);
+            // Re-billboard to the camera every frame, then layer the
+            // impact tumble on top — without this, a character kept
+            // whatever angle it faced the moment pilot mode started, so
+            // it read backwards or edge-on as soon as the ship turned.
+            tumbleDelta.setFromEuler(tumbleEuler.set(u.spin.x * dt, u.spin.y * dt, u.spin.z * dt));
+            u.tiltQuat.multiply(tumbleDelta).normalize();
+            p.quaternion.copy(camera.quaternion).multiply(u.tiltQuat);
           });
         } else {
           beaconLabel.style.opacity = "0";
