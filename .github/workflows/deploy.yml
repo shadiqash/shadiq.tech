@@ -17,4 +17,4 @@ jobs:
           mkdir -p ~/.ssh
           echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh -p 41447 -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" true
+          ssh -p 22 -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" true
